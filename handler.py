@@ -1,14 +1,15 @@
 """RunPod Serverless handler for YouTube Shorts generation."""
 import runpod
-from app import run_job
+import traceback
 
 
 def handler(job):
     try:
+        # Lazy import - only runs when GPU is available
+        from app import run_job
         result = run_job(job["input"])
         return result
     except Exception as e:
-        import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}
 
 
