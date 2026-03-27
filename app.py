@@ -34,7 +34,10 @@ def get_sdxl():
             variant="fp16",
             use_safetensors=True,
         ).to("cuda")
-        _sdxl_pipe.enable_xformers_memory_efficient_attention()
+        try:
+            _sdxl_pipe.enable_xformers_memory_efficient_attention()
+        except Exception:
+            pass  # xformers optional
     return _sdxl_pipe
 
 
