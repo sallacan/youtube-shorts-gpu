@@ -1,14 +1,26 @@
-FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /workspace
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3.10-dev \
+    python3-pip \
     ffmpeg \
     git \
     espeak-ng \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3 /usr/bin/python
+
+# PyTorch with CUDA 12.1
+RUN pip install --no-cache-dir torch==2.2.0 torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # Python deps
 COPY requirements.txt .
