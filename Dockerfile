@@ -29,7 +29,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app
 COPY app.py handler.py ./
 
+# Copy music files
+COPY music/ /workspace/music/
+
 # Runtime asset directories
-RUN mkdir -p /workspace/music /workspace/fonts /workspace/outputs
+RUN mkdir -p /workspace/fonts /workspace/outputs
 
 CMD ["python3", "-u", "handler.py"]
