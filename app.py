@@ -279,14 +279,14 @@ def run_job(job_input: dict) -> dict:
     pipe = get_sdxl()
     num_scenes = len(scenes)
     scene_frames = int((duration / num_scenes) * fps)
-    pan_options = [(0.02, 0.0), (-0.02, 0.0), (0.0, 0.02), (0.0, -0.02)]
+    pan_options = [(0.005, 0.0), (-0.005, 0.0), (0.0, 0.005), (0.0, -0.005)]
 
     all_frames = []
     for idx, prompt in enumerate(scenes):
         print(f"[JOB {job_id}]   Scene {idx+1}/{num_scenes}")
         img_array = generate_image(prompt, pipe)
         pan = random.choice(pan_options)
-        frames = ken_burns(img_array, scene_frames, zoom_start=1.0, zoom_end=1.08,
+        frames = ken_burns(img_array, scene_frames, zoom_start=1.0, zoom_end=1.03,
                            pan_x=pan[0], pan_y=pan[1])
         all_frames.extend(frames)
 
