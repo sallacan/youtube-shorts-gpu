@@ -149,7 +149,7 @@ Timer: 100.0000
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,20,20,80,1
+Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,20,20,460,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -193,7 +193,7 @@ def mix_audio(voice_path: str, music_file: str, duration: float,
         "-i", voice_path,
         "-stream_loop", "-1", "-i", music_file,
         "-filter_complex",
-        f"[1:a]volume={music_volume}[music];[0:a][music]amix=inputs=2:duration=first[out]",
+        f"[1:a]volume={music_volume}[music];[0:a][music]amix=inputs=2:duration=first:normalize=0[out]",
         "-map", "[out]",
         "-t", str(duration),
         "-ar", "22050",
@@ -229,7 +229,7 @@ def run_job(job_input: dict) -> dict:
         voice       (str, optional) - Kokoro voice, default "af_heart"
         music_file  (str, optional) - filename in MUSIC_DIR, random if omitted
         font_name   (str, optional) - subtitle font, default "Arial"
-        font_size   (int, optional) - subtitle size, default 72
+        font_size   (int, optional) - subtitle size, default 52
         job_id      (str, optional) - auto-generated if missing
     """
     job_id = job_input.get("job_id") or str(uuid.uuid4())[:8]
@@ -238,7 +238,7 @@ def run_job(job_input: dict) -> dict:
     title = job_input.get("title", "video")
     voice = job_input.get("voice", "af_heart")
     font_name = job_input.get("font_name", "Arial")
-    font_size = job_input.get("font_size", 72)
+    font_size = job_input.get("font_size", 52)
     fps = 24
 
     # Pick music
