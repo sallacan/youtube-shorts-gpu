@@ -318,7 +318,7 @@ def run_job(job_input: dict) -> dict:
 
     # ── STEP 8: Upload to transfer.sh ────────────────────────────────
     print(f"[JOB {job_id}] Step 8: Uploading to transfer.sh")
-    filename = os.path.basename(output_path)
+    filename = os.path.basename(output_path).replace(" ", "_")
     upload_url = f"https://transfer.sh/{filename}"
     req = urllib.request.Request(
         upload_url,
