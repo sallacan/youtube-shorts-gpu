@@ -315,18 +315,33 @@ def run_job(job_input: dict) -> dict:
     merge_video_audio(silent_video, final_audio, ass_path, duration,
                       output_path, font_name=font_name)
 
-    # ── STEP 8: Upload to transfer.sh ────────────────────────────────
-    print(f"[JOB {job_id}] Step 8: Uploading to transfer.sh")
-    filename = os.path.basename(output_path).replace(" ", "_")
-    result = subprocess.run(
-        ["curl", "-s", "--max-time", "120", "-T", output_path,
-         "-H", "Max-Days: 3",
-         f"https://transfer.sh/{filename}"],
+    # ── STEP 8: Upload video ──────────────────────────────────────────
+    print(f"[JOB {job_id}] Step 8: Uploading video")
+    video_url = None
+
+    # Try 0x0.st
+    r1 = subprocess.run(
+        ["curl", "-s", "--max-time", "120", "-F", f"file=@{output_path}", "https://0x0.st"],
         capture_output=True, text=True
     )
-    video_url = result.stdout.strip()
-    if not video_url or not video_url.startswith("http"):
-        raise RuntimeError(f"transfer.sh upload failed: {result.stderr}")
+    if r1.stdout.strip().startswith("http"):
+        video_url = r1.stdout.strip()
+        print(f"[JOB {job_id}] Uploaded to 0x0.st")
+
+    # Fallback: transfer.sh
+    if not video_url:
+        filename = os.path.basename(output_path).replace(" ", "_")
+        r2 = subprocess.run(
+            ["curl", "-s", "--max-time", "120", "-T", output_path,
+             "-H", "Max-Days: 3", f"https://transfer.sh/{filename}"],
+            capture_output=True, text=True
+        )
+        if r2.stdout.strip().startswith("http"):
+            video_url = r2.stdout.strip()
+            print(f"[JOB {job_id}] Uploaded to transfer.sh")
+
+    if not video_url:
+        raise RuntimeError(f"All uploads failed. 0x0: {r1.returncode} {r1.stderr[:200]}")
     print(f"[JOB {job_id}] Done → {video_url}")
 
     return {
