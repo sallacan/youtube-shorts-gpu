@@ -20,7 +20,7 @@ RUN ln -sf /usr/bin/python3.10 /usr/bin/python3 && \
     ln -sf /usr/bin/python3 /usr/bin/python
 
 # PyTorch with CUDA 12.1
-RUN pip install --no-cache-dir torch==2.2.0 torchvision --index-url https://download.pytorch.org/whl/cu121
+RUN pip install --no-cache-dir torch==2.2.0 torchvision torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cu121
 
 # Python deps
 COPY requirements.txt .

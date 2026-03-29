@@ -6,6 +6,8 @@ import numpy as np
 import soundfile as sf
 import random
 import urllib.request
+import torch
+import torchaudio
 
 from PIL import Image
 from diffusers import StableDiffusionXLPipeline
@@ -261,10 +263,11 @@ def run_job(job_input: dict) -> dict:
             samples_list.append(audio)
     if not samples_list:
         raise RuntimeError("TTS produced no audio")
-    sf.write(audio_path, np.concatenate([
-        s.cpu().numpy() if hasattr(s, 'cpu') else np.array(s)
+    audio_tensor = torch.cat([
+        s.detach().cpu() if isinstance(s, torch.Tensor) else torch.tensor(s)
         for s in samples_list
-    ]), 24000)
+    ])
+    torchaudio.save(audio_path, audio_tensor.unsqueeze(0), 24000)
     duration = sf.info(audio_path).duration
     print(f"[JOB {job_id}] Audio duration: {duration:.2f}s")
 
