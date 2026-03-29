@@ -5,6 +5,7 @@ import tempfile
 import numpy as np
 import soundfile as sf
 import random
+import urllib.request
 
 from PIL import Image
 from diffusers import StableDiffusionXLPipeline
@@ -260,7 +261,10 @@ def run_job(job_input: dict) -> dict:
             samples_list.append(audio)
     if not samples_list:
         raise RuntimeError("TTS produced no audio")
-    sf.write(audio_path, np.concatenate(samples_list), 24000)
+    sf.write(audio_path, np.concatenate([
+        s.cpu().numpy() if hasattr(s, 'cpu') else np.array(s)
+        for s in samples_list
+    ]), 24000)
     duration = sf.info(audio_path).duration
     print(f"[JOB {job_id}] Audio duration: {duration:.2f}s")
 
@@ -309,10 +313,23 @@ def run_job(job_input: dict) -> dict:
     merge_video_audio(silent_video, final_audio, ass_path, duration,
                       output_path, font_name=font_name)
 
-    print(f"[JOB {job_id}] Done → {output_path}")
+    # ── STEP 8: Upload to transfer.sh ────────────────────────────────
+    print(f"[JOB {job_id}] Step 8: Uploading to transfer.sh")
+    filename = os.path.basename(output_path)
+    upload_url = f"https://transfer.sh/{filename}"
+    req = urllib.request.Request(
+        upload_url,
+        data=open(output_path, "rb"),
+        method="PUT",
+        headers={"Max-Days": "3"},
+    )
+    with urllib.request.urlopen(req) as resp:
+        video_url = resp.read().decode("utf-8").strip()
+    print(f"[JOB {job_id}] Done → {video_url}")
+
     return {
         "job_id": job_id,
-        "output_path": output_path,
+        "video_url": video_url,
         "duration": round(duration, 2),
         "scenes": num_scenes,
     }
