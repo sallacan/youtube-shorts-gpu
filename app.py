@@ -341,7 +341,7 @@ def run_job(job_input: dict) -> dict:
             print(f"[JOB {job_id}] Uploaded to transfer.sh")
 
     if not video_url:
-        raise RuntimeError(f"All uploads failed. 0x0: {r1.returncode} {r1.stderr[:200]}")
+        raise RuntimeError(f"All uploads failed. 0x0: rc={r1.returncode} out={r1.stdout[:300]} err={r1.stderr[:200]}")
     print(f"[JOB {job_id}] Done → {video_url}")
 
     return {
