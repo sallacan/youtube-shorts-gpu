@@ -5,7 +5,6 @@ import tempfile
 import numpy as np
 import soundfile as sf
 import random
-import urllib.request
 import torch
 import torchaudio
 
@@ -319,15 +318,15 @@ def run_job(job_input: dict) -> dict:
     # ── STEP 8: Upload to transfer.sh ────────────────────────────────
     print(f"[JOB {job_id}] Step 8: Uploading to transfer.sh")
     filename = os.path.basename(output_path).replace(" ", "_")
-    upload_url = f"https://transfer.sh/{filename}"
-    req = urllib.request.Request(
-        upload_url,
-        data=open(output_path, "rb"),
-        method="PUT",
-        headers={"Max-Days": "3"},
+    result = subprocess.run(
+        ["curl", "-s", "--max-time", "120", "-T", output_path,
+         "-H", "Max-Days: 3",
+         f"https://transfer.sh/{filename}"],
+        capture_output=True, text=True
     )
-    with urllib.request.urlopen(req) as resp:
-        video_url = resp.read().decode("utf-8").strip()
+    video_url = result.stdout.strip()
+    if not video_url or not video_url.startswith("http"):
+        raise RuntimeError(f"transfer.sh upload failed: {result.stderr}")
     print(f"[JOB {job_id}] Done → {video_url}")
 
     return {
