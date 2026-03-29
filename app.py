@@ -318,30 +318,40 @@ def run_job(job_input: dict) -> dict:
     # ── STEP 8: Upload video ──────────────────────────────────────────
     print(f"[JOB {job_id}] Step 8: Uploading video")
     video_url = None
+    upload_errors = []
 
-    # Try 0x0.st
+    # Try catbox.moe (permanent, no account needed, 200MB limit)
     r1 = subprocess.run(
-        ["curl", "-s", "--max-time", "120", "-F", f"file=@{output_path}", "https://0x0.st"],
+        ["curl", "-s", "--max-time", "120",
+         "-F", "reqtype=fileupload",
+         "-F", f"fileToUpload=@{output_path}",
+         "https://catbox.moe/user/api.php"],
         capture_output=True, text=True
     )
     if r1.stdout.strip().startswith("http"):
         video_url = r1.stdout.strip()
-        print(f"[JOB {job_id}] Uploaded to 0x0.st")
+        print(f"[JOB {job_id}] Uploaded to catbox.moe")
+    else:
+        upload_errors.append(f"catbox: rc={r1.returncode} out={r1.stdout[:100]}")
 
-    # Fallback: transfer.sh
+    # Fallback: litterbox.catbox.moe (temporary 72h)
     if not video_url:
-        filename = os.path.basename(output_path).replace(" ", "_")
         r2 = subprocess.run(
-            ["curl", "-s", "--max-time", "120", "-T", output_path,
-             "-H", "Max-Days: 3", f"https://transfer.sh/{filename}"],
+            ["curl", "-s", "--max-time", "120",
+             "-F", "reqtype=fileupload",
+             "-F", "time=72h",
+             "-F", f"fileToUpload=@{output_path}",
+             "https://litterbox.catbox.moe/resources/internals/api.php"],
             capture_output=True, text=True
         )
         if r2.stdout.strip().startswith("http"):
             video_url = r2.stdout.strip()
-            print(f"[JOB {job_id}] Uploaded to transfer.sh")
+            print(f"[JOB {job_id}] Uploaded to litterbox")
+        else:
+            upload_errors.append(f"litterbox: rc={r2.returncode} out={r2.stdout[:100]}")
 
     if not video_url:
-        raise RuntimeError(f"All uploads failed. 0x0: rc={r1.returncode} out={r1.stdout[:300]} err={r1.stderr[:200]}")
+        raise RuntimeError(f"All uploads failed: {'; '.join(upload_errors)}")
     print(f"[JOB {job_id}] Done → {video_url}")
 
     return {
