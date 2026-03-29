@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     ffmpeg \
     git \
+    curl \
     espeak-ng \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
