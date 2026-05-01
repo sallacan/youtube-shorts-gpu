@@ -74,7 +74,7 @@ def generate_image(prompt: str, pipe, width=720, height=1280) -> np.ndarray:
 
 
 def ken_burns(frame_array: np.ndarray, total_frames: int,
-              zoom_start=1.0, zoom_end=1.08, pan_x=0.0, pan_y=0.0) -> list:
+              zoom_start=1.0, zoom_end=1.15, pan_x=0.0, pan_y=0.0) -> list:
     h, w = frame_array.shape[:2]
     frames = []
     for i in range(total_frames):
@@ -82,8 +82,9 @@ def ken_burns(frame_array: np.ndarray, total_frames: int,
         scale = zoom_start + (zoom_end - zoom_start) * t
         new_w = int(w / scale)
         new_h = int(h / scale)
-        cx = int(w / 2 + pan_x * w * t)
-        cy = int(h / 2 + pan_y * h * t)
+        # round() instead of int() for smoother sub-pixel movement
+        cx = round(w / 2 + pan_x * w * t)
+        cy = round(h / 2 + pan_y * h * t)
         x1 = max(0, cx - new_w // 2)
         y1 = max(0, cy - new_h // 2)
         x2 = min(w, x1 + new_w)
@@ -96,6 +97,25 @@ def ken_burns(frame_array: np.ndarray, total_frames: int,
         pil_img = Image.fromarray(cropped).resize((w, h), Image.LANCZOS)
         frames.append(pil_img)
     return frames
+
+
+def crossfade_scenes(scene_list: list, crossfade: int = 18) -> list:
+    """Blend consecutive scenes with a smooth crossfade transition."""
+    if not scene_list:
+        return []
+    result = list(scene_list[0])
+    for i in range(1, len(scene_list)):
+        curr = scene_list[i]
+        cf = min(crossfade, len(result), len(curr))
+        blended = []
+        for j in range(cf):
+            alpha = j / cf  # 0.0 (prev) → 1.0 (curr)
+            prev_arr = np.array(result[-cf + j], dtype=np.float32)
+            curr_arr = np.array(curr[j], dtype=np.float32)
+            merged = (prev_arr * (1.0 - alpha) + curr_arr * alpha).astype(np.uint8)
+            blended.append(Image.fromarray(merged))
+        result = result[:-cf] + blended + list(curr[cf:])
+    return result
 
 
 def frames_to_video(frames: list, output_path: str, fps: int = 24):
@@ -239,7 +259,6 @@ def run_job(job_input: dict) -> dict:
     voice = job_input.get("voice", "af_heart")
     font_name = job_input.get("font_name", "Arial")
     font_size = job_input.get("font_size", 52)
-    fps = 24
 
     # Pick music
     music_file_input = job_input.get("music_file")
@@ -248,6 +267,17 @@ def run_job(job_input: dict) -> dict:
     else:
         available = [f for f in os.listdir(MUSIC_DIR) if f.endswith((".mp3", ".wav"))] if os.path.isdir(MUSIC_DIR) else []
         music_path = os.path.join(MUSIC_DIR, random.choice(available)) if available else None
+
+    # Alternating cinematic pan directions — no random reversals between scenes
+    PAN_SEQUENCE = [
+        ( 0.06,  0.0),   # pan right
+        (-0.06,  0.0),   # pan left
+        ( 0.0,  -0.05),  # pan up
+        ( 0.0,   0.05),  # pan down
+        ( 0.05, -0.03),  # diagonal top-right
+    ]
+    CROSSFADE = 18  # frames blended at each scene boundary
+    fps = 24
 
     work_dir = tempfile.mkdtemp(prefix=f"job_{job_id}_")
     print(f"[JOB {job_id}] Starting — {len(scenes)} scenes")
@@ -278,17 +308,25 @@ def run_job(job_input: dict) -> dict:
     print(f"[JOB {job_id}] Step 3: Image generation ({len(scenes)} scenes)")
     pipe = get_sdxl()
     num_scenes = len(scenes)
-    scene_frames = int((duration / num_scenes) * fps)
-    pan_options = [(0.005, 0.0), (-0.005, 0.0), (0.0, 0.005), (0.0, -0.005)]
+    # Extra frames per scene to compensate for crossfade overlap
+    scene_frames = int((duration / num_scenes) * fps) + CROSSFADE
 
-    all_frames = []
+    scene_frames_list = []
     for idx, prompt in enumerate(scenes):
         print(f"[JOB {job_id}]   Scene {idx+1}/{num_scenes}")
         img_array = generate_image(prompt, pipe)
-        pan = random.choice(pan_options)
-        frames = ken_burns(img_array, scene_frames, zoom_start=1.0, zoom_end=1.03,
+        # Sequential alternating pan — no random direction reversals
+        pan = PAN_SEQUENCE[idx % len(PAN_SEQUENCE)]
+        frames = ken_burns(img_array, scene_frames, zoom_start=1.0, zoom_end=1.15,
                            pan_x=pan[0], pan_y=pan[1])
-        all_frames.extend(frames)
+        scene_frames_list.append(frames)
+
+    # Crossfade between scenes for smooth transitions
+    all_frames = crossfade_scenes(scene_frames_list, CROSSFADE)
+    # Ensure enough frames to fill full audio duration
+    needed = int(duration * fps) + fps
+    while len(all_frames) < needed:
+        all_frames.append(all_frames[-1])
 
     # ── STEP 4: Silent video ──────────────────────────────────────────
     print(f"[JOB {job_id}] Step 4: Writing video")
