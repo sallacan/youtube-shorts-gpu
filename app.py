@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import subprocess
 import tempfile
@@ -74,28 +75,49 @@ def generate_image(prompt: str, pipe, width=720, height=1280) -> np.ndarray:
 
 
 def ken_burns(frame_array: np.ndarray, total_frames: int,
-              zoom_start=1.0, zoom_end=1.15, pan_x=0.0, pan_y=0.0) -> list:
+              out_w: int = 720, out_h: int = 1280,
+              zoom_start: float = 1.0, zoom_end: float = 1.12,
+              pan_x: float = 0.0, pan_y: float = 0.0) -> list:
+    """
+    Sub-pixel accurate Ken Burns via PIL affine transform.
+    frame_array should be LARGER than out_w x out_h (e.g. 1080x1920)
+    to provide working room for pan movement.
+    """
+    src_img = Image.fromarray(frame_array)
     h, w = frame_array.shape[:2]
     frames = []
+
     for i in range(total_frames):
         t = i / max(total_frames - 1, 1)
         scale = zoom_start + (zoom_end - zoom_start) * t
-        new_w = int(w / scale)
-        new_h = int(h / scale)
-        # round() instead of int() for smoother sub-pixel movement
-        cx = round(w / 2 + pan_x * w * t)
-        cy = round(h / 2 + pan_y * h * t)
-        x1 = max(0, cx - new_w // 2)
-        y1 = max(0, cy - new_h // 2)
-        x2 = min(w, x1 + new_w)
-        y2 = min(h, y1 + new_h)
-        if x2 - x1 < new_w:
-            x1 = max(0, x2 - new_w)
-        if y2 - y1 < new_h:
-            y1 = max(0, y2 - new_h)
-        cropped = frame_array[y1:y2, x1:x2]
-        pil_img = Image.fromarray(cropped).resize((w, h), Image.LANCZOS)
+
+        # How many source pixels map to one output pixel at this zoom
+        # crop region size in source coords
+        crop_w = out_w / scale
+        crop_h = out_h / scale
+
+        # Floating-point center of crop in source image
+        cx = w / 2.0 + pan_x * w * t
+        cy = h / 2.0 + pan_y * h * t
+
+        # Clamp: keep crop fully inside source
+        cx = max(crop_w / 2.0, min(w - crop_w / 2.0, cx))
+        cy = max(crop_h / 2.0, min(h - crop_h / 2.0, cy))
+
+        # Top-left of crop in source coords (sub-pixel)
+        x0 = cx - crop_w / 2.0
+        y0 = cy - crop_h / 2.0
+
+        # PIL AFFINE: output(px,py) → source(a*px + c, e*py + f)
+        pil_img = src_img.transform(
+            (out_w, out_h),
+            Image.AFFINE,
+            (1.0 / scale, 0.0, x0,
+             0.0, 1.0 / scale, y0),
+            resample=Image.LANCZOS,
+        )
         frames.append(pil_img)
+
     return frames
 
 
@@ -268,13 +290,20 @@ def run_job(job_input: dict) -> dict:
         available = [f for f in os.listdir(MUSIC_DIR) if f.endswith((".mp3", ".wav"))] if os.path.isdir(MUSIC_DIR) else []
         music_path = os.path.join(MUSIC_DIR, random.choice(available)) if available else None
 
-    # Alternating cinematic pan directions — no random reversals between scenes
+    # Output dimensions
+    OUT_W, OUT_H = 720, 1280
+    # Upscale source to 1080x1920 for pan workspace:
+    # gives 360px horizontal + 640px vertical pan range at scale=1.0
+    # so pan_x=0.15 → 162px total pan (0.56px/frame for 12s scenes → smooth drift)
+    SRC_W, SRC_H = 1080, 1920
+    # Alternating cinematic pan directions (values relative to SRC_W/SRC_H)
+    # max safe pan at scale=1.0: (SRC_W - OUT_W) / (2 * SRC_W) = 360/2160 = 0.167
     PAN_SEQUENCE = [
-        ( 0.06,  0.0),   # pan right
-        (-0.06,  0.0),   # pan left
-        ( 0.0,  -0.05),  # pan up
-        ( 0.0,   0.05),  # pan down
-        ( 0.05, -0.03),  # diagonal top-right
+        ( 0.14,  0.0),   # pan right
+        (-0.14,  0.0),   # pan left
+        ( 0.0,  -0.12),  # pan up
+        ( 0.0,   0.12),  # pan down
+        ( 0.10, -0.08),  # diagonal top-right
     ]
     CROSSFADE = 18  # frames blended at each scene boundary
     fps = 24
@@ -286,12 +315,20 @@ def run_job(job_input: dict) -> dict:
     print(f"[JOB {job_id}] Step 1: TTS ({voice})")
     tts = get_tts()
     audio_path = os.path.join(work_dir, "narration.wav")
+
+    # Sanitize: Kokoro TTS is English-only; strip non-ASCII to prevent silent failure
+    tts_text = re.sub(r'[^\x00-\x7F]+', '', narration)
+    tts_text = re.sub(r'\s+', ' ', tts_text).strip()
+    if not tts_text:
+        raise RuntimeError(f"Narration is empty after ASCII sanitization. Original: {narration[:80]!r}")
+    print(f"[JOB {job_id}] TTS text ({len(tts_text)} chars): {tts_text[:80]}...")
+
     samples_list = []
-    for _, _, audio in tts(narration, voice=voice, speed=1.0):
+    for _, _, audio in tts(tts_text, voice=voice, speed=1.0):
         if audio is not None:
             samples_list.append(audio)
     if not samples_list:
-        raise RuntimeError("TTS produced no audio")
+        raise RuntimeError(f"TTS produced no audio for text: {tts_text[:80]!r}")
     audio_tensor = torch.cat([
         s.detach().cpu() if isinstance(s, torch.Tensor) else torch.tensor(s)
         for s in samples_list
@@ -314,10 +351,16 @@ def run_job(job_input: dict) -> dict:
     scene_frames_list = []
     for idx, prompt in enumerate(scenes):
         print(f"[JOB {job_id}]   Scene {idx+1}/{num_scenes}")
-        img_array = generate_image(prompt, pipe)
+        img_array = generate_image(prompt, pipe)  # 720x1280
+        # Software upscale to SRC_W x SRC_H for pan workspace (fast, no SDXL overhead)
+        src_upscaled = np.array(
+            Image.fromarray(img_array).resize((SRC_W, SRC_H), Image.LANCZOS)
+        )
         # Sequential alternating pan — no random direction reversals
         pan = PAN_SEQUENCE[idx % len(PAN_SEQUENCE)]
-        frames = ken_burns(img_array, scene_frames, zoom_start=1.0, zoom_end=1.15,
+        frames = ken_burns(src_upscaled, scene_frames,
+                           out_w=OUT_W, out_h=OUT_H,
+                           zoom_start=1.0, zoom_end=1.12,
                            pan_x=pan[0], pan_y=pan[1])
         scene_frames_list.append(frames)
 
