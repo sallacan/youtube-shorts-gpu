@@ -415,7 +415,7 @@ def run_job(job_input: dict) -> dict:
     else:
         upload_errors.append(f"catbox: rc={r1.returncode} out={r1.stdout[:100]}")
 
-    # Fallback: litterbox.catbox.moe (temporary 72h)
+    # Fallback 1: litterbox.catbox.moe (temporary 72h)
     if not video_url:
         r2 = subprocess.run(
             ["curl", "-s", "--max-time", "120",
@@ -430,6 +430,43 @@ def run_job(job_input: dict) -> dict:
             print(f"[JOB {job_id}] Uploaded to litterbox")
         else:
             upload_errors.append(f"litterbox: rc={r2.returncode} out={r2.stdout[:100]}")
+
+    # Fallback 2: 0x0.st (512MB limit, long-term hosting)
+    if not video_url:
+        r3 = subprocess.run(
+            ["curl", "-s", "--max-time", "120",
+             "-F", f"file=@{output_path}",
+             "https://0x0.st"],
+            capture_output=True, text=True
+        )
+        if r3.stdout.strip().startswith("http"):
+            video_url = r3.stdout.strip()
+            print(f"[JOB {job_id}] Uploaded to 0x0.st")
+        else:
+            upload_errors.append(f"0x0: rc={r3.returncode} out={r3.stdout[:100]}")
+
+    # Fallback 3: gofile.io (no size limit, free)
+    if not video_url:
+        try:
+            import urllib.request
+            srv_resp = urllib.request.urlopen("https://api.gofile.io/servers", timeout=10)
+            import json as _json
+            srv_data = _json.loads(srv_resp.read().decode())
+            server = srv_data["data"]["servers"][0]["name"]
+            r4 = subprocess.run(
+                ["curl", "-s", "--max-time", "180",
+                 "-F", f"file=@{output_path}",
+                 f"https://{server}.gofile.io/uploadFile"],
+                capture_output=True, text=True
+            )
+            r4_json = _json.loads(r4.stdout)
+            if r4_json.get("status") == "ok":
+                video_url = r4_json["data"]["downloadPage"]
+                print(f"[JOB {job_id}] Uploaded to gofile.io")
+            else:
+                upload_errors.append(f"gofile: {r4.stdout[:100]}")
+        except Exception as e:
+            upload_errors.append(f"gofile: {str(e)[:100]}")
 
     if not video_url:
         raise RuntimeError(f"All uploads failed: {'; '.join(upload_errors)}")
