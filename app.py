@@ -292,18 +292,18 @@ def run_job(job_input: dict) -> dict:
 
     # Output dimensions
     OUT_W, OUT_H = 720, 1280
-    # Upscale source to 1080x1920 for pan workspace:
-    # gives 360px horizontal + 640px vertical pan range at scale=1.0
-    # so pan_x=0.15 → 162px total pan (0.56px/frame for 12s scenes → smooth drift)
-    SRC_W, SRC_H = 1080, 1920
-    # Alternating cinematic pan directions (values relative to SRC_W/SRC_H)
-    # max safe pan at scale=1.0: (SRC_W - OUT_W) / (2 * SRC_W) = 360/2160 = 0.167
+    # Pan workspace comes from zoom (no upscale — native SDXL pixels only).
+    # zoom_start=1.10 → zoom_end=1.30 gives 47px→83px H spare, 84px→148px V spare.
+    # pan_x=0.10 → total 72px source pan, well within limits at all t. ✓
+    # Per-frame visible output motion ≈ 0.7px/frame → smooth cinematic drift.
+    ZOOM_START = 1.10
+    ZOOM_END   = 1.30
     PAN_SEQUENCE = [
-        ( 0.14,  0.0),   # pan right
-        (-0.14,  0.0),   # pan left
-        ( 0.0,  -0.12),  # pan up
-        ( 0.0,   0.12),  # pan down
-        ( 0.10, -0.08),  # diagonal top-right
+        ( 0.10,  0.0),   # pan right + slow zoom in
+        (-0.10,  0.0),   # pan left  + slow zoom in
+        ( 0.0,  -0.09),  # pan up    + slow zoom in
+        ( 0.0,   0.09),  # pan down  + slow zoom in
+        ( 0.07, -0.07),  # diagonal  + slow zoom in
     ]
     CROSSFADE = 18  # frames blended at each scene boundary
     fps = 24
@@ -351,16 +351,12 @@ def run_job(job_input: dict) -> dict:
     scene_frames_list = []
     for idx, prompt in enumerate(scenes):
         print(f"[JOB {job_id}]   Scene {idx+1}/{num_scenes}")
-        img_array = generate_image(prompt, pipe)  # 720x1280
-        # Software upscale to SRC_W x SRC_H for pan workspace (fast, no SDXL overhead)
-        src_upscaled = np.array(
-            Image.fromarray(img_array).resize((SRC_W, SRC_H), Image.LANCZOS)
-        )
-        # Sequential alternating pan — no random direction reversals
+        img_array = generate_image(prompt, pipe)  # 720x1280 native SDXL pixels
+        # No upscale — zoom provides pan workspace, avoids double-LANCZOS artifacts
         pan = PAN_SEQUENCE[idx % len(PAN_SEQUENCE)]
-        frames = ken_burns(src_upscaled, scene_frames,
+        frames = ken_burns(img_array, scene_frames,
                            out_w=OUT_W, out_h=OUT_H,
-                           zoom_start=1.0, zoom_end=1.12,
+                           zoom_start=ZOOM_START, zoom_end=ZOOM_END,
                            pan_x=pan[0], pan_y=pan[1])
         scene_frames_list.append(frames)
 
