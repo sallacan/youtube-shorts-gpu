@@ -11,7 +11,6 @@ import torchaudio
 
 from PIL import Image
 from diffusers import StableDiffusionXLPipeline
-import torch
 from kokoro import KPipeline
 from faster_whisper import WhisperModel
 
@@ -47,8 +46,17 @@ def get_sdxl():
 def get_tts():
     global _tts_pipe
     if _tts_pipe is None:
-        print("[MODEL] Loading Kokoro TTS...")
-        _tts_pipe = KPipeline(lang_code="a")
+        print("[MODEL] Loading Kokoro TTS on CPU...")
+        # KPipeline auto-detects CUDA via torch.cuda.is_available().
+        # Force CPU to avoid CUDA kernel arch mismatch on RunPod workers.
+        # TTS inference is fast enough on CPU for short narrations.
+        _orig_cuda = torch.cuda.is_available
+        torch.cuda.is_available = lambda: False
+        try:
+            _tts_pipe = KPipeline(lang_code="a")
+        finally:
+            torch.cuda.is_available = _orig_cuda
+        print("[MODEL] Kokoro TTS loaded on CPU")
     return _tts_pipe
 
 
