@@ -1,11 +1,11 @@
-FROM runpod/pytorch:2.2.1-py3.10-cuda12.1.1-devel-ubuntu22.04
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /workspace
 
-# System deps (Python 3.10, PyTorch 2.2.1+cu121 already in base image)
+# System deps (Python, PyTorch 2.4.1+cu121, torchvision, torchaudio already in base)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
@@ -16,12 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Pin numpy to avoid ABI issues with older compiled extensions
 RUN pip install --no-cache-dir numpy==1.26.4
-
-# torchvision + torchaudio matching torch 2.2.1 in base
-RUN pip install --no-cache-dir \
-    torchvision==0.17.1 \
-    torchaudio==2.2.1 \
-    --index-url https://download.pytorch.org/whl/cu121
 
 # Python deps
 COPY requirements.txt .
