@@ -464,6 +464,35 @@ def run_job(job_input: dict) -> dict:
         except Exception as e:
             upload_errors.append(f"gofile: {str(e)[:100]}")
 
+    # Fallback 4: transfer.sh (works reliably from server IPs, 14-day retention)
+    if not video_url:
+        filename = os.path.basename(output_path)
+        r5 = subprocess.run(
+            ["curl", "-s", "--max-time", "180",
+             "--upload-file", output_path,
+             f"https://transfer.sh/{filename}"],
+            capture_output=True, text=True
+        )
+        if r5.stdout.strip().startswith("http"):
+            video_url = r5.stdout.strip()
+            print(f"[JOB {job_id}] Uploaded to transfer.sh")
+        else:
+            upload_errors.append(f"transfer.sh: rc={r5.returncode} out={r5.stdout[:100]}")
+
+    # Fallback 5: temp.sh (anonymous, no account, works from server IPs)
+    if not video_url:
+        r6 = subprocess.run(
+            ["curl", "-s", "--max-time", "180",
+             "-F", f"file=@{output_path}",
+             "https://temp.sh/upload"],
+            capture_output=True, text=True
+        )
+        if r6.stdout.strip().startswith("http"):
+            video_url = r6.stdout.strip()
+            print(f"[JOB {job_id}] Uploaded to temp.sh")
+        else:
+            upload_errors.append(f"temp.sh: rc={r6.returncode} out={r6.stdout[:100]}")
+
     if not video_url:
         raise RuntimeError(f"All uploads failed: {'; '.join(upload_errors)}")
     print(f"[JOB {job_id}] Done → {video_url}")
