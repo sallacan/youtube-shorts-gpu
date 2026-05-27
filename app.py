@@ -122,7 +122,7 @@ def ken_burns(frame_array: np.ndarray, total_frames: int,
             Image.AFFINE,
             (1.0 / scale, 0.0, x0,
              0.0, 1.0 / scale, y0),
-            resample=Image.LANCZOS,
+            resample=Image.BICUBIC,
         )
         frames.append(pil_img)
 
