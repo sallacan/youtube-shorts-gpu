@@ -449,93 +449,70 @@ def run_job(job_input: dict) -> dict:
         else:
             upload_errors.append(f"0x0: rc={r3.returncode} out={r3.stdout[:100]}")
 
-    # Fallback 3: gofile.io (no size limit, free)
-    if not video_url:
-        try:
-            import urllib.request
-            srv_resp = urllib.request.urlopen("https://api.gofile.io/servers", timeout=10)
-            import json as _json
-            srv_data = _json.loads(srv_resp.read().decode())
-            server = srv_data["data"]["servers"][0]["name"]
-            r4 = subprocess.run(
-                ["curl", "-s", "--max-time", "180",
-                 "-F", f"file=@{output_path}",
-                 f"https://{server}.gofile.io/uploadFile"],
-                capture_output=True, text=True
-            )
-            r4_json = _json.loads(r4.stdout)
-            if r4_json.get("status") == "ok":
-                video_url = r4_json["data"]["downloadPage"]
-                print(f"[JOB {job_id}] Uploaded to gofile.io")
-            else:
-                upload_errors.append(f"gofile: {r4.stdout[:100]}")
-        except Exception as e:
-            upload_errors.append(f"gofile: {str(e)[:100]}")
-
-    # Fallback 4: transfer.sh (works reliably from server IPs, 14-day retention)
-    if not video_url:
-        filename = os.path.basename(output_path)
-        r5 = subprocess.run(
-            ["curl", "-s", "--max-time", "180",
-             "--upload-file", output_path,
-             f"https://transfer.sh/{filename}"],
-            capture_output=True, text=True
-        )
-        if r5.stdout.strip().startswith("http"):
-            video_url = r5.stdout.strip()
-            print(f"[JOB {job_id}] Uploaded to transfer.sh")
-        else:
-            upload_errors.append(f"transfer.sh: rc={r5.returncode} out={r5.stdout[:100]}")
-
-    # Fallback 5: temp.sh (anonymous, no account, works from server IPs)
-    if not video_url:
-        r6 = subprocess.run(
-            ["curl", "-s", "--max-time", "180",
-             "-F", f"file=@{output_path}",
-             "https://temp.sh/upload"],
-            capture_output=True, text=True
-        )
-        if r6.stdout.strip().startswith("http"):
-            video_url = r6.stdout.strip()
-            print(f"[JOB {job_id}] Uploaded to temp.sh")
-        else:
-            upload_errors.append(f"temp.sh: rc={r6.returncode} out={r6.stdout[:100]}")
-
-    # Fallback 6: pixeldrain.com (datacenter-friendly, 20 GB/day, permanent)
+    # Fallback 3: pixeldrain.com (datacenter-friendly, direct API download URL)
     if not video_url:
         try:
             import json as _pj
-            r7 = subprocess.run(
+            r4 = subprocess.run(
                 ["curl", "-s", "--max-time", "180",
                  "-F", f"file=@{output_path}",
                  "https://pixeldrain.com/api/file"],
                 capture_output=True, text=True
             )
-            r7_data = _pj.loads(r7.stdout)
-            if r7_data.get("id"):
-                video_url = f"https://pixeldrain.com/api/file/{r7_data['id']}"
+            r4_data = _pj.loads(r4.stdout)
+            if r4_data.get("id"):
+                video_url = f"https://pixeldrain.com/api/file/{r4_data['id']}"
                 print(f"[JOB {job_id}] Uploaded to pixeldrain.com")
             else:
-                upload_errors.append(f"pixeldrain: {r7.stdout[:100]}")
+                upload_errors.append(f"pixeldrain: {r4.stdout[:100]}")
         except Exception as e:
             upload_errors.append(f"pixeldrain: {str(e)[:100]}")
 
-    # Fallback 7: bashupload.com (datacenter-friendly, 3-day retention)
+    # Fallback 4: bashupload.com (datacenter-friendly, direct download URL)
     if not video_url:
         filename = os.path.basename(output_path)
-        r8 = subprocess.run(
+        r5 = subprocess.run(
             ["curl", "-s", "--max-time", "180",
              "-T", output_path,
              f"https://bashupload.com/{filename}"],
             capture_output=True, text=True
         )
-        for line in r8.stdout.splitlines():
+        for line in r5.stdout.splitlines():
             if line.strip().startswith("http"):
                 video_url = line.strip()
                 print(f"[JOB {job_id}] Uploaded to bashupload.com")
                 break
         if not video_url:
-            upload_errors.append(f"bashupload: rc={r8.returncode} out={r8.stdout[:100]}")
+            upload_errors.append(f"bashupload: rc={r5.returncode} out={r5.stdout[:100]}")
+
+    # Fallback 5: transfer.sh (14-day retention)
+    if not video_url:
+        filename = os.path.basename(output_path)
+        r6 = subprocess.run(
+            ["curl", "-s", "--max-time", "180",
+             "--upload-file", output_path,
+             f"https://transfer.sh/{filename}"],
+            capture_output=True, text=True
+        )
+        if r6.stdout.strip().startswith("http"):
+            video_url = r6.stdout.strip()
+            print(f"[JOB {job_id}] Uploaded to transfer.sh")
+        else:
+            upload_errors.append(f"transfer.sh: rc={r6.returncode} out={r6.stdout[:100]}")
+
+    # Fallback 6: temp.sh (anonymous upload)
+    if not video_url:
+        r7 = subprocess.run(
+            ["curl", "-s", "--max-time", "180",
+             "-F", f"file=@{output_path}",
+             "https://temp.sh/upload"],
+            capture_output=True, text=True
+        )
+        if r7.stdout.strip().startswith("http"):
+            video_url = r7.stdout.strip()
+            print(f"[JOB {job_id}] Uploaded to temp.sh")
+        else:
+            upload_errors.append(f"temp.sh: rc={r7.returncode} out={r7.stdout[:100]}")
 
     if not video_url:
         raise RuntimeError(f"All uploads failed: {'; '.join(upload_errors)}")
