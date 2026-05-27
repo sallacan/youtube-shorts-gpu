@@ -501,6 +501,42 @@ def run_job(job_input: dict) -> dict:
         else:
             upload_errors.append(f"temp.sh: rc={r6.returncode} out={r6.stdout[:100]}")
 
+    # Fallback 6: pixeldrain.com (datacenter-friendly, 20 GB/day, permanent)
+    if not video_url:
+        try:
+            import json as _pj
+            r7 = subprocess.run(
+                ["curl", "-s", "--max-time", "180",
+                 "-F", f"file=@{output_path}",
+                 "https://pixeldrain.com/api/file"],
+                capture_output=True, text=True
+            )
+            r7_data = _pj.loads(r7.stdout)
+            if r7_data.get("id"):
+                video_url = f"https://pixeldrain.com/api/file/{r7_data['id']}"
+                print(f"[JOB {job_id}] Uploaded to pixeldrain.com")
+            else:
+                upload_errors.append(f"pixeldrain: {r7.stdout[:100]}")
+        except Exception as e:
+            upload_errors.append(f"pixeldrain: {str(e)[:100]}")
+
+    # Fallback 7: bashupload.com (datacenter-friendly, 3-day retention)
+    if not video_url:
+        filename = os.path.basename(output_path)
+        r8 = subprocess.run(
+            ["curl", "-s", "--max-time", "180",
+             "-T", output_path,
+             f"https://bashupload.com/{filename}"],
+            capture_output=True, text=True
+        )
+        for line in r8.stdout.splitlines():
+            if line.strip().startswith("http"):
+                video_url = line.strip()
+                print(f"[JOB {job_id}] Uploaded to bashupload.com")
+                break
+        if not video_url:
+            upload_errors.append(f"bashupload: rc={r8.returncode} out={r8.stdout[:100]}")
+
     if not video_url:
         raise RuntimeError(f"All uploads failed: {'; '.join(upload_errors)}")
     print(f"[JOB {job_id}] Done → {video_url}")
