@@ -405,6 +405,25 @@ def run_job(job_input: dict) -> dict:
     video_url = None
     upload_errors = []
 
+    def _is_direct_video_url(url):
+        """HEAD-check that a URL serves a binary file, not an HTML page."""
+        try:
+            chk = subprocess.run(
+                ["curl", "-sI", "--max-time", "15", "--max-redirs", "5", "-L", url],
+                capture_output=True, text=True
+            )
+            # Find the last Content-Type header (after redirects)
+            ct = ""
+            for line in chk.stdout.splitlines():
+                if line.lower().startswith("content-type:"):
+                    ct = line.lower()
+            is_video = "text/html" not in ct and "text/plain" not in ct
+            print(f"[JOB {job_id}] URL check {url[:60]} → {ct.strip()} → {'OK' if is_video else 'HTML-rejected'}")
+            return is_video
+        except Exception as e:
+            print(f"[JOB {job_id}] URL check failed: {e}")
+            return False
+
     # Try catbox.moe (permanent, no account needed, 200MB limit)
     r1 = subprocess.run(
         ["curl", "-s", "--max-time", "120",
@@ -413,7 +432,7 @@ def run_job(job_input: dict) -> dict:
          "https://catbox.moe/user/api.php"],
         capture_output=True, text=True
     )
-    if r1.stdout.strip().startswith("http"):
+    if r1.stdout.strip().startswith("http") and _is_direct_video_url(r1.stdout.strip()):
         video_url = r1.stdout.strip()
         print(f"[JOB {job_id}] Uploaded to catbox.moe")
     else:
@@ -429,7 +448,7 @@ def run_job(job_input: dict) -> dict:
              "https://litterbox.catbox.moe/resources/internals/api.php"],
             capture_output=True, text=True
         )
-        if r2.stdout.strip().startswith("http"):
+        if r2.stdout.strip().startswith("http") and _is_direct_video_url(r2.stdout.strip()):
             video_url = r2.stdout.strip()
             print(f"[JOB {job_id}] Uploaded to litterbox")
         else:
@@ -443,13 +462,13 @@ def run_job(job_input: dict) -> dict:
              "https://0x0.st"],
             capture_output=True, text=True
         )
-        if r3.stdout.strip().startswith("http"):
+        if r3.stdout.strip().startswith("http") and _is_direct_video_url(r3.stdout.strip()):
             video_url = r3.stdout.strip()
             print(f"[JOB {job_id}] Uploaded to 0x0.st")
         else:
             upload_errors.append(f"0x0: rc={r3.returncode} out={r3.stdout[:100]}")
 
-    # Fallback 3: pixeldrain.com (datacenter-friendly, direct API download URL)
+    # Fallback 3: pixeldrain.com (API endpoint is a direct binary download)
     if not video_url:
         try:
             import json as _pj
@@ -461,58 +480,76 @@ def run_job(job_input: dict) -> dict:
             )
             r4_data = _pj.loads(r4.stdout)
             if r4_data.get("id"):
-                video_url = f"https://pixeldrain.com/api/file/{r4_data['id']}"
-                print(f"[JOB {job_id}] Uploaded to pixeldrain.com")
+                candidate = f"https://pixeldrain.com/api/file/{r4_data['id']}"
+                if _is_direct_video_url(candidate):
+                    video_url = candidate
+                    print(f"[JOB {job_id}] Uploaded to pixeldrain.com")
+                else:
+                    upload_errors.append(f"pixeldrain: url returned html")
             else:
                 upload_errors.append(f"pixeldrain: {r4.stdout[:100]}")
         except Exception as e:
             upload_errors.append(f"pixeldrain: {str(e)[:100]}")
 
-    # Fallback 4: bashupload.com (datacenter-friendly, direct download URL)
+    # Fallback 4: uguu.se (24h retention, datacenter-friendly, direct URL)
+    if not video_url:
+        try:
+            import json as _uj
+            r5 = subprocess.run(
+                ["curl", "-s", "--max-time", "180",
+                 "-F", f"files[]=@{output_path}",
+                 "https://uguu.se/upload"],
+                capture_output=True, text=True
+            )
+            r5_data = _uj.loads(r5.stdout)
+            files = r5_data.get("files", [])
+            if files and files[0].get("url"):
+                candidate = files[0]["url"]
+                if _is_direct_video_url(candidate):
+                    video_url = candidate
+                    print(f"[JOB {job_id}] Uploaded to uguu.se")
+                else:
+                    upload_errors.append(f"uguu: url returned html")
+            else:
+                upload_errors.append(f"uguu: {r5.stdout[:100]}")
+        except Exception as e:
+            upload_errors.append(f"uguu: {str(e)[:100]}")
+
+    # Fallback 5: bashupload.com
     if not video_url:
         filename = os.path.basename(output_path)
-        r5 = subprocess.run(
+        r6 = subprocess.run(
             ["curl", "-s", "--max-time", "180",
              "-T", output_path,
              f"https://bashupload.com/{filename}"],
             capture_output=True, text=True
         )
-        for line in r5.stdout.splitlines():
+        for line in r6.stdout.splitlines():
             if line.strip().startswith("http"):
-                video_url = line.strip()
-                print(f"[JOB {job_id}] Uploaded to bashupload.com")
+                candidate = line.strip()
+                if _is_direct_video_url(candidate):
+                    video_url = candidate
+                    print(f"[JOB {job_id}] Uploaded to bashupload.com")
                 break
         if not video_url:
-            upload_errors.append(f"bashupload: rc={r5.returncode} out={r5.stdout[:100]}")
+            upload_errors.append(f"bashupload: rc={r6.returncode} out={r6.stdout[:100]}")
 
-    # Fallback 5: transfer.sh (14-day retention)
+    # Fallback 6: transfer.sh (14-day retention)
     if not video_url:
         filename = os.path.basename(output_path)
-        r6 = subprocess.run(
+        r7 = subprocess.run(
             ["curl", "-s", "--max-time", "180",
              "--upload-file", output_path,
              f"https://transfer.sh/{filename}"],
             capture_output=True, text=True
         )
-        if r6.stdout.strip().startswith("http"):
-            video_url = r6.stdout.strip()
+        if r7.stdout.strip().startswith("http") and _is_direct_video_url(r7.stdout.strip()):
+            video_url = r7.stdout.strip()
             print(f"[JOB {job_id}] Uploaded to transfer.sh")
         else:
-            upload_errors.append(f"transfer.sh: rc={r6.returncode} out={r6.stdout[:100]}")
+            upload_errors.append(f"transfer.sh: rc={r7.returncode} out={r7.stdout[:100]}")
 
-    # Fallback 6: temp.sh (anonymous upload)
-    if not video_url:
-        r7 = subprocess.run(
-            ["curl", "-s", "--max-time", "180",
-             "-F", f"file=@{output_path}",
-             "https://temp.sh/upload"],
-            capture_output=True, text=True
-        )
-        if r7.stdout.strip().startswith("http"):
-            video_url = r7.stdout.strip()
-            print(f"[JOB {job_id}] Uploaded to temp.sh")
-        else:
-            upload_errors.append(f"temp.sh: rc={r7.returncode} out={r7.stdout[:100]}")
+    # Fallback 7: temp.sh — skipped: returns HTML download page, not raw binary
 
     if not video_url:
         raise RuntimeError(f"All uploads failed: {'; '.join(upload_errors)}")
@@ -523,4 +560,5 @@ def run_job(job_input: dict) -> dict:
         "video_url": video_url,
         "duration": round(duration, 2),
         "scenes": num_scenes,
+        "upload_errors": upload_errors,
     }
