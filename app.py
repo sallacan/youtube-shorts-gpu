@@ -406,20 +406,27 @@ def run_job(job_input: dict) -> dict:
     upload_errors = []
 
     def _is_direct_video_url(url):
-        """HEAD-check that a URL serves a binary file, not an HTML page."""
+        """HEAD-check that a URL serves a non-empty binary file, not an HTML page or deleted file."""
         try:
             chk = subprocess.run(
                 ["curl", "-sI", "--max-time", "15", "--max-redirs", "5", "-L", url],
                 capture_output=True, text=True
             )
-            # Find the last Content-Type header (after redirects)
+            # Find the last Content-Type and Content-Length headers (after redirects)
             ct = ""
+            cl = ""
             for line in chk.stdout.splitlines():
-                if line.lower().startswith("content-type:"):
-                    ct = line.lower()
-            is_video = "text/html" not in ct and "text/plain" not in ct
-            print(f"[JOB {job_id}] URL check {url[:60]} → {ct.strip()} → {'OK' if is_video else 'HTML-rejected'}")
-            return is_video
+                ll = line.lower()
+                if ll.startswith("content-type:"):
+                    ct = ll
+                if ll.startswith("content-length:"):
+                    cl = ll
+            is_binary = "text/html" not in ct and "text/plain" not in ct
+            # Content-Length: 0 means file was deleted (e.g. catbox purges datacenter uploads)
+            is_nonempty = "content-length: 0" not in cl
+            ok = is_binary and is_nonempty
+            print(f"[JOB {job_id}] URL check {url[:60]} → ct={ct.strip()} cl={cl.strip()} → {'OK' if ok else 'REJECTED'}")
+            return ok
         except Exception as e:
             print(f"[JOB {job_id}] URL check failed: {e}")
             return False
