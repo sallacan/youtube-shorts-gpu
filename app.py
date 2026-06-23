@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+import json
 import subprocess
 import tempfile
 import numpy as np
@@ -178,10 +179,14 @@ def transcribe_words(audio_path: str) -> list:
     return words
 
 
-def extend_word_gaps(words: list) -> list:
+def extend_word_gaps(words: list, max_gap: float = 0.8) -> list:
     result = []
     for i, w in enumerate(words):
-        end = words[i + 1]["start"] if i + 1 < len(words) else w["end"]
+        if i + 1 < len(words):
+            next_start = words[i + 1]["start"]
+            end = min(next_start, w["end"] + max_gap)
+        else:
+            end = w["end"]
         result.append({"word": w["word"], "start": w["start"], "end": end})
     return result
 
@@ -246,7 +251,7 @@ def mix_audio(voice_path: str, music_file: str, duration: float,
         f"[1:a]volume={music_volume}[music];[0:a][music]amix=inputs=2:duration=first:normalize=0[out]",
         "-map", "[out]",
         "-t", str(duration),
-        "-ar", "22050",
+        "-ar", "24000",
         output
     ], check=True, stderr=subprocess.DEVNULL)
     return output
@@ -353,14 +358,22 @@ def run_job(job_input: dict) -> dict:
     print(f"[JOB {job_id}] Step 3: Image generation ({len(scenes)} scenes)")
     pipe = get_sdxl()
     num_scenes = len(scenes)
-    # Extra frames per scene to compensate for crossfade overlap
-    scene_frames = int((duration / num_scenes) * fps) + CROSSFADE
+    # Each scene boundary consumes CROSSFADE frames from two adjacent scenes.
+    # Total frames needed after crossfading: duration*fps + 1 safety frame.
+    # crossfade_scenes() removes (num_scenes-1)*CROSSFADE frames total, so each
+    # scene must contribute that back proportionally.
+    total_needed = int(duration * fps) + fps
+    scene_frames = (total_needed + (num_scenes - 1) * CROSSFADE) // num_scenes + 1
 
     scene_frames_list = []
     for idx, prompt in enumerate(scenes):
         print(f"[JOB {job_id}]   Scene {idx+1}/{num_scenes}")
         img_array = generate_image(prompt, pipe)  # 720x1280 native SDXL pixels
-        # No upscale — zoom provides pan workspace, avoids double-LANCZOS artifacts
+        # Upscale to 900x1600 to give Ken Burns sufficient pan workspace.
+        # At zoom_start=1.10 the crop window is 818x1454px, leaving 82px H and
+        # 146px V slack — enough for pan_x=0.10 (90px travel) without clamping.
+        src_img = Image.fromarray(img_array).resize((900, 1600), Image.BICUBIC)
+        img_array = np.array(src_img)
         pan = PAN_SEQUENCE[idx % len(PAN_SEQUENCE)]
         frames = ken_burns(img_array, scene_frames,
                            out_w=OUT_W, out_h=OUT_H,
@@ -370,10 +383,6 @@ def run_job(job_input: dict) -> dict:
 
     # Crossfade between scenes for smooth transitions
     all_frames = crossfade_scenes(scene_frames_list, CROSSFADE)
-    # Ensure enough frames to fill full audio duration
-    needed = int(duration * fps) + fps
-    while len(all_frames) < needed:
-        all_frames.append(all_frames[-1])
 
     # ── STEP 4: Silent video ──────────────────────────────────────────
     print(f"[JOB {job_id}] Step 4: Writing video")
@@ -478,14 +487,13 @@ def run_job(job_input: dict) -> dict:
     # Fallback 3: pixeldrain.com (API endpoint is a direct binary download)
     if not video_url:
         try:
-            import json as _pj
             r4 = subprocess.run(
                 ["curl", "-s", "--max-time", "180",
                  "-F", f"file=@{output_path}",
                  "https://pixeldrain.com/api/file"],
                 capture_output=True, text=True
             )
-            r4_data = _pj.loads(r4.stdout)
+            r4_data = json.loads(r4.stdout)
             if r4_data.get("id"):
                 candidate = f"https://pixeldrain.com/api/file/{r4_data['id']}"
                 if _is_direct_video_url(candidate):
@@ -501,14 +509,13 @@ def run_job(job_input: dict) -> dict:
     # Fallback 4: uguu.se (24h retention, datacenter-friendly, direct URL)
     if not video_url:
         try:
-            import json as _uj
             r5 = subprocess.run(
                 ["curl", "-s", "--max-time", "180",
                  "-F", f"files[]=@{output_path}",
                  "https://uguu.se/upload"],
                 capture_output=True, text=True
             )
-            r5_data = _uj.loads(r5.stdout)
+            r5_data = json.loads(r5.stdout)
             files = r5_data.get("files", [])
             if files and files[0].get("url"):
                 candidate = files[0]["url"]
