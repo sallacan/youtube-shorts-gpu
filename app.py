@@ -15,6 +15,7 @@ from PIL import Image
 from diffusers import StableDiffusionXLPipeline
 from kokoro import KPipeline
 from faster_whisper import WhisperModel
+from transformers import pipeline as hf_pipeline
 
 
 # ── Global model cache ──────────────────────────────────────────────
@@ -70,12 +71,37 @@ def get_whisper():
     return _whisper_model
 
 
+_nsfw_clf = None
+
+def get_nsfw_classifier():
+    global _nsfw_clf
+    if _nsfw_clf is None:
+        print("[MODEL] Loading NSFW classifier...")
+        _nsfw_clf = hf_pipeline(
+            "image-classification",
+            model="Falconsai/nsfw_image_detection",
+            device=0 if torch.cuda.is_available() else -1,
+        )
+    return _nsfw_clf
+
+
+def is_nsfw(pil_img, threshold: float = 0.6) -> bool:
+    for r in get_nsfw_classifier()(pil_img):
+        if r["label"].lower() == "nsfw" and r["score"] >= threshold:
+            return True
+    return False
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 def generate_image(prompt: str, pipe, width=720, height=1280) -> np.ndarray:
     result = pipe(
         prompt=prompt,
-        negative_prompt="blurry, low quality, distorted, watermark, text, logo",
+        negative_prompt=(
+            "nsfw, nudity, nude, naked, topless, bare skin, exposed skin, lingerie, "
+            "underwear, bikini, cleavage, sexual, suggestive, erotic, provocative, "
+            "revealing clothing, blurry, low quality, distorted, watermark, text, logo"
+        ),
         width=width,
         height=height,
         num_inference_steps=30,
@@ -369,7 +395,21 @@ def run_job(job_input: dict) -> dict:
         scene_frames_list = []
         for idx, prompt in enumerate(scenes):
             print(f"[JOB {job_id}]   Scene {idx+1}/{num_scenes}")
-            img_array = generate_image(prompt, pipe)  # 720x1280 native SDXL pixels
+
+            img_array = None
+            working_prompt = prompt
+            for attempt in range(3):
+                candidate = generate_image(working_prompt, pipe)  # 720x1280 native SDXL pixels
+                if not is_nsfw(Image.fromarray(candidate)):
+                    img_array = candidate
+                    break
+                print(f"[JOB {job_id}]   Scene {idx+1} attempt {attempt+1} flagged NSFW, retrying with reinforced prompt")
+                working_prompt = f"{prompt}, fully clothed, modest, safe for work, no nudity, no exposed skin"
+            if img_array is None:
+                raise RuntimeError(
+                    f"Scene {idx+1} ('{prompt[:60]}...') repeatedly generated NSFW content after 3 attempts — job aborted for safety."
+                )
+
             # Upscale to 900x1600 to give Ken Burns sufficient pan workspace.
             # At zoom_start=1.10 the crop window is 818x1454px, leaving 82px H and
             # 146px V slack — enough for pan_x=0.10 (90px travel) without clamping.
