@@ -1,13 +1,14 @@
-# Runtime dependencies for YouTube Shorts GPU worker
-runpod>=1.6.0
+# Runtime dependencies — PINNED to the exact versions in the last known-good image
+# (63a5e30) to prevent the dependency-drift that crash-looped a previous rebuild.
+runpod==1.10.0
 huggingface_hub==0.24.6
 diffusers==0.27.2
 transformers==4.38.2
 accelerate==0.27.2
 kokoro==0.9.2
-soundfile>=0.12.1
-numpy>=1.24.0
-Pillow>=10.0.0
-faster-whisper>=1.0.0
-safetensors>=0.4.0
-sentencepiece
+soundfile==0.14.0
+numpy==1.26.4
+Pillow==10.2.0
+faster-whisper==1.2.1
+safetensors==0.8.0
+sentencepiece==0.2.1

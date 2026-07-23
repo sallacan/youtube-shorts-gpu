@@ -10,12 +10,12 @@ import soundfile as sf
 import random
 import torch
 import torchaudio
+import time
 
 from PIL import Image
 from diffusers import StableDiffusionXLPipeline
 from kokoro import KPipeline
 from faster_whisper import WhisperModel
-from transformers import pipeline as hf_pipeline
 
 
 # ── Global model cache ──────────────────────────────────────────────
@@ -69,27 +69,6 @@ def get_whisper():
         print("[MODEL] Loading Faster-Whisper...")
         _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
     return _whisper_model
-
-
-_nsfw_clf = None
-
-def get_nsfw_classifier():
-    global _nsfw_clf
-    if _nsfw_clf is None:
-        print("[MODEL] Loading NSFW classifier...")
-        _nsfw_clf = hf_pipeline(
-            "image-classification",
-            model="Falconsai/nsfw_image_detection",
-            device=0 if torch.cuda.is_available() else -1,
-        )
-    return _nsfw_clf
-
-
-def is_nsfw(pil_img, threshold: float = 0.6) -> bool:
-    for r in get_nsfw_classifier()(pil_img):
-        if r["label"].lower() == "nsfw" and r["score"] >= threshold:
-            return True
-    return False
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -302,6 +281,75 @@ def merge_video_audio(video_path: str, audio_path: str, ass_path: str,
 
 # ── Main job function ────────────────────────────────────────────────
 
+
+# ── Stock video helpers (Pexels) ───────────────────────────────────
+
+def pexels_search_video(query, api_key, timeout=20):
+    import urllib.request, urllib.parse
+    url = ("https://api.pexels.com/videos/search?query="
+           + urllib.parse.quote(query) + "&orientation=portrait&per_page=10")
+    data = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"Authorization": api_key})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.load(r)
+            break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(3); continue
+            print(f"[PEXELS] search failed for {query!r}: {e}")
+            return None
+    best, best_score = None, 10**9
+    for v in (data.get("videos") or []):
+        for f in (v.get("video_files") or []):
+            h, w = f.get("height", 0), f.get("width", 0)
+            if h > w and h >= 720 and f.get("link"):
+                score = abs(h - 1280)
+                if score < best_score:
+                    best, best_score = f["link"], score
+        if best is not None:
+            break
+    return best
+
+
+def build_stock_clip(query, api_key, out_path, duration, w=720, h=1280):
+    """Download a Pexels clip, normalize to w x h and exactly `duration` sec, no audio."""
+    url = pexels_search_video(query, api_key)
+    if not url:
+        return False
+    raw = out_path + ".raw"
+    r = subprocess.run(["curl", "-sL", "--max-time", "60", "-o", raw, url],
+                       capture_output=True)
+    if r.returncode != 0 or not os.path.exists(raw) or os.path.getsize(raw) < 10000:
+        try: os.remove(raw)
+        except Exception: pass
+        return False
+    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1"
+    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", raw,
+           "-t", f"{duration:.3f}", "-vf", vf, "-an", "-r", "30",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p",
+           "-preset", "veryfast", "-crf", "20", out_path]
+    r = subprocess.run(cmd, capture_output=True)
+    try: os.remove(raw)
+    except Exception: pass
+    return r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 10000
+
+
+def concat_stock_clips(clip_paths, out_path, duration):
+    listfile = out_path + ".txt"
+    with open(listfile, "w") as f:
+        for c in clip_paths:
+            f.write(f"file '{c}'\n")
+    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile,
+                    "-t", f"{duration + 0.5:.3f}",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-preset", "veryfast", "-crf", "20", out_path],
+                   capture_output=True)
+    try: os.remove(listfile)
+    except Exception: pass
+
+
 def run_job(job_input: dict) -> dict:
     """
     job_input keys:
@@ -381,54 +429,55 @@ def run_job(job_input: dict) -> dict:
         print(f"[JOB {job_id}] Step 2: Whisper transcription")
         words = extend_word_gaps(transcribe_words(audio_path))
 
-        # ── STEP 3: Generate images ───────────────────────────────────────
-        print(f"[JOB {job_id}] Step 3: Image generation ({len(scenes)} scenes)")
-        pipe = get_sdxl()
-        num_scenes = len(scenes)
-        # Each scene boundary consumes CROSSFADE frames from two adjacent scenes.
-        # Total frames needed after crossfading: duration*fps + 1 safety frame.
-        # crossfade_scenes() removes (num_scenes-1)*CROSSFADE frames total, so each
-        # scene must contribute that back proportionally.
-        total_needed = int(duration * fps) + fps
-        scene_frames = (total_needed + (num_scenes - 1) * CROSSFADE) // num_scenes + 1
-
-        scene_frames_list = []
-        for idx, prompt in enumerate(scenes):
-            print(f"[JOB {job_id}]   Scene {idx+1}/{num_scenes}")
-
-            img_array = None
-            working_prompt = prompt
-            for attempt in range(3):
-                candidate = generate_image(working_prompt, pipe)  # 720x1280 native SDXL pixels
-                if not is_nsfw(Image.fromarray(candidate)):
-                    img_array = candidate
-                    break
-                print(f"[JOB {job_id}]   Scene {idx+1} attempt {attempt+1} flagged NSFW, retrying with reinforced prompt")
-                working_prompt = f"{prompt}, fully clothed, modest, safe for work, no nudity, no exposed skin"
-            if img_array is None:
-                raise RuntimeError(
-                    f"Scene {idx+1} ('{prompt[:60]}...') repeatedly generated NSFW content after 3 attempts — job aborted for safety."
-                )
-
-            # Upscale to 900x1600 to give Ken Burns sufficient pan workspace.
-            # At zoom_start=1.10 the crop window is 818x1454px, leaving 82px H and
-            # 146px V slack — enough for pan_x=0.10 (90px travel) without clamping.
-            src_img = Image.fromarray(img_array).resize((900, 1600), Image.BICUBIC)
-            img_array = np.array(src_img)
-            pan = PAN_SEQUENCE[idx % len(PAN_SEQUENCE)]
-            frames = ken_burns(img_array, scene_frames,
-                               out_w=OUT_W, out_h=OUT_H,
-                               zoom_start=ZOOM_START, zoom_end=ZOOM_END,
-                               pan_x=pan[0], pan_y=pan[1])
-            scene_frames_list.append(frames)
-
-        # Crossfade between scenes for smooth transitions
-        all_frames = crossfade_scenes(scene_frames_list, CROSSFADE)
-
-        # ── STEP 4: Silent video ──────────────────────────────────────────
-        print(f"[JOB {job_id}] Step 4: Writing video")
+        # ── STEP 3-4: Build silent video (STOCK clips OR SDXL stills) ─────
         silent_video = os.path.join(work_dir, "silent.mp4")
-        frames_to_video(all_frames, silent_video, fps=fps)
+        num_scenes = len(scenes)
+        render_mode = job_input.get("render_mode", "sdxl")
+        pexels_key = os.environ.get("PEXELS_API_KEY", "").strip()
+
+        if render_mode == "stock" and pexels_key:
+            print(f"[JOB {job_id}] Step 3-4: STOCK video ({num_scenes} scenes)")
+            scene_dur = duration / num_scenes
+            clip_paths = []
+            for idx, scene in enumerate(scenes):
+                print(f"[JOB {job_id}]   Stock scene {idx+1}/{num_scenes}: {scene[:50]}")
+                clip = os.path.join(work_dir, f"scene_{idx}.mp4")
+                ok = build_stock_clip(scene, pexels_key, clip, scene_dur + 0.4, OUT_W, OUT_H)
+                if not ok:
+                    ok = build_stock_clip(" ".join(scene.split()[:3]), pexels_key, clip, scene_dur + 0.4, OUT_W, OUT_H)
+                if not ok:
+                    print(f"[JOB {job_id}]   scene {idx+1}: no stock clip -> SDXL fallback")
+                    pipe = get_sdxl()
+                    img = generate_image(scene, pipe)
+                    src_img = Image.fromarray(img).resize((900, 1600), Image.BICUBIC)
+                    frames = ken_burns(np.array(src_img), int((scene_dur + 0.4) * fps),
+                                       out_w=OUT_W, out_h=OUT_H,
+                                       zoom_start=1.10, zoom_end=1.25, pan_x=0.08, pan_y=0.0)
+                    frames_to_video(frames, clip, fps=fps)
+                clip_paths.append(clip)
+                time.sleep(1.3)  # Pexels burst throttle
+            concat_stock_clips(clip_paths, silent_video, duration)
+        else:
+            # ── SDXL still-image path (original) ──
+            print(f"[JOB {job_id}] Step 3: Image generation ({num_scenes} scenes)")
+            pipe = get_sdxl()
+            total_needed = int(duration * fps) + fps
+            scene_frames = (total_needed + (num_scenes - 1) * CROSSFADE) // num_scenes + 1
+            scene_frames_list = []
+            for idx, prompt in enumerate(scenes):
+                print(f"[JOB {job_id}]   Scene {idx+1}/{num_scenes}")
+                img_array = generate_image(prompt, pipe)
+                src_img = Image.fromarray(img_array).resize((900, 1600), Image.BICUBIC)
+                img_array = np.array(src_img)
+                pan = PAN_SEQUENCE[idx % len(PAN_SEQUENCE)]
+                frames = ken_burns(img_array, scene_frames,
+                                   out_w=OUT_W, out_h=OUT_H,
+                                   zoom_start=ZOOM_START, zoom_end=ZOOM_END,
+                                   pan_x=pan[0], pan_y=pan[1])
+                scene_frames_list.append(frames)
+            all_frames = crossfade_scenes(scene_frames_list, CROSSFADE)
+            print(f"[JOB {job_id}] Step 4: Writing video")
+            frames_to_video(all_frames, silent_video, fps=fps)
 
         # ── STEP 5: Subtitles ─────────────────────────────────────────────
         print(f"[JOB {job_id}] Step 5: Subtitles")
