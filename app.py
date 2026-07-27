@@ -284,10 +284,11 @@ def merge_video_audio(video_path: str, audio_path: str, ass_path: str,
 
 # ── Stock video helpers (Pexels) ───────────────────────────────────
 
-def pexels_search_video(query, api_key, timeout=20):
+def pexels_search_videos(query, api_key, timeout=20):
+    """Return a list of vertical clip URLs (best-res per video), best matches first."""
     import urllib.request, urllib.parse
     url = ("https://api.pexels.com/videos/search?query="
-           + urllib.parse.quote(query) + "&orientation=portrait&per_page=10")
+           + urllib.parse.quote(query) + "&orientation=portrait&per_page=15")
     data = None
     for attempt in range(3):
         try:
@@ -299,41 +300,56 @@ def pexels_search_video(query, api_key, timeout=20):
             if attempt < 2:
                 time.sleep(3); continue
             print(f"[PEXELS] search failed for {query!r}: {e}")
-            return None
-    best, best_score = None, 10**9
+            return []
+    out = []
     for v in (data.get("videos") or []):
+        best, best_score = None, 10**9
         for f in (v.get("video_files") or []):
             h, w = f.get("height", 0), f.get("width", 0)
             if h > w and h >= 720 and f.get("link"):
                 score = abs(h - 1280)
                 if score < best_score:
                     best, best_score = f["link"], score
-        if best is not None:
-            break
-    return best
+        if best:
+            out.append(best)
+    return out
 
 
-def build_stock_clip(query, api_key, out_path, duration, w=720, h=1280):
-    """Download a Pexels clip, normalize to w x h and exactly `duration` sec, no audio."""
-    url = pexels_search_video(query, api_key)
-    if not url:
-        return False
-    raw = out_path + ".raw"
-    r = subprocess.run(["curl", "-sL", "--max-time", "60", "-o", raw, url],
-                       capture_output=True)
-    if r.returncode != 0 or not os.path.exists(raw) or os.path.getsize(raw) < 10000:
-        try: os.remove(raw)
-        except Exception: pass
-        return False
-    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1"
-    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", raw,
-           "-t", f"{duration:.3f}", "-vf", vf, "-an", "-r", "30",
-           "-c:v", "libx264", "-pix_fmt", "yuv420p",
+def _normalize_clip(raw, out_path, duration, w, h, zoom=True):
+    """ffmpeg: fill w x h, exactly `duration` sec, no audio, optional slow push-in zoom."""
+    base = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1"
+    if zoom:
+        vf = (base + f",zoompan=z='min(zoom+0.0009,1.18)':d=1:"
+              f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':fps=30:s={w}x{h}")
+    else:
+        vf = base + ",fps=30"
+    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", raw, "-t", f"{duration:.3f}",
+           "-vf", vf, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
            "-preset", "veryfast", "-crf", "20", out_path]
     r = subprocess.run(cmd, capture_output=True)
-    try: os.remove(raw)
-    except Exception: pass
     return r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 10000
+
+
+def build_stock_clip(query, api_key, out_path, duration, w=720, h=1280, used=None):
+    """Download an UNUSED Pexels clip for `query`, normalize with zoom. Tracks used URLs."""
+    if used is None:
+        used = set()
+    for url in pexels_search_videos(query, api_key):
+        if url in used:
+            continue
+        raw = out_path + ".raw"
+        r = subprocess.run(["curl", "-sL", "--max-time", "60", "-o", raw, url], capture_output=True)
+        if r.returncode != 0 or not os.path.exists(raw) or os.path.getsize(raw) < 10000:
+            continue
+        ok = _normalize_clip(raw, out_path, duration, w, h, zoom=True)
+        if not ok:
+            ok = _normalize_clip(raw, out_path, duration, w, h, zoom=False)
+        try: os.remove(raw)
+        except Exception: pass
+        if ok:
+            used.add(url)
+            return True
+    return False
 
 
 def concat_stock_clips(clip_paths, out_path, duration):
@@ -348,6 +364,20 @@ def concat_stock_clips(clip_paths, out_path, duration):
                    capture_output=True)
     try: os.remove(listfile)
     except Exception: pass
+
+
+def merge_number_tokens(words):
+    """Merge caption tokens starting with a comma/period into the previous token,
+    so numbers like "2,000" never split across two captions."""
+    out = []
+    for w in words:
+        t = w.get("word", "")
+        if out and t[:1] in (",", ".") and out[-1]["word"][-1:].isdigit():
+            out[-1]["word"] += t
+            out[-1]["end"] = w["end"]
+        else:
+            out.append(dict(w))
+    return out
 
 
 def run_job(job_input: dict) -> dict:
@@ -427,7 +457,7 @@ def run_job(job_input: dict) -> dict:
 
         # ── STEP 2: Transcribe for subtitles ─────────────────────────────
         print(f"[JOB {job_id}] Step 2: Whisper transcription")
-        words = extend_word_gaps(transcribe_words(audio_path))
+        words = merge_number_tokens(extend_word_gaps(transcribe_words(audio_path)))
 
         # ── STEP 3-4: Build silent video (STOCK clips OR SDXL stills) ─────
         silent_video = os.path.join(work_dir, "silent.mp4")
@@ -436,26 +466,29 @@ def run_job(job_input: dict) -> dict:
         pexels_key = os.environ.get("PEXELS_API_KEY", "").strip()
 
         if render_mode == "stock" and pexels_key:
-            print(f"[JOB {job_id}] Step 3-4: STOCK video ({num_scenes} scenes)")
-            scene_dur = duration / num_scenes
+            SEG = 3.2
+            n_seg = max(num_scenes, int(round(duration / SEG)))
+            seg_dur = duration / n_seg
+            print(f"[JOB {job_id}] Step 3-4: STOCK video ({n_seg} clips, ~{seg_dur:.1f}s each)")
+            used = set()
             clip_paths = []
-            for idx, scene in enumerate(scenes):
-                print(f"[JOB {job_id}]   Stock scene {idx+1}/{num_scenes}: {scene[:50]}")
-                clip = os.path.join(work_dir, f"scene_{idx}.mp4")
-                ok = build_stock_clip(scene, pexels_key, clip, scene_dur + 0.4, OUT_W, OUT_H)
+            for i in range(n_seg):
+                scene = scenes[i % num_scenes]
+                clip = os.path.join(work_dir, f"seg_{i}.mp4")
+                ok = build_stock_clip(scene, pexels_key, clip, seg_dur + 0.3, OUT_W, OUT_H, used)
                 if not ok:
-                    ok = build_stock_clip(" ".join(scene.split()[:3]), pexels_key, clip, scene_dur + 0.4, OUT_W, OUT_H)
+                    ok = build_stock_clip(" ".join(scene.split()[:3]), pexels_key, clip, seg_dur + 0.3, OUT_W, OUT_H, used)
                 if not ok:
-                    print(f"[JOB {job_id}]   scene {idx+1}: no stock clip -> SDXL fallback")
+                    print(f"[JOB {job_id}]   seg {i+1}: no stock clip -> SDXL fallback")
                     pipe = get_sdxl()
                     img = generate_image(scene, pipe)
                     src_img = Image.fromarray(img).resize((900, 1600), Image.BICUBIC)
-                    frames = ken_burns(np.array(src_img), int((scene_dur + 0.4) * fps),
+                    frames = ken_burns(np.array(src_img), int((seg_dur + 0.3) * fps),
                                        out_w=OUT_W, out_h=OUT_H,
-                                       zoom_start=1.10, zoom_end=1.25, pan_x=0.08, pan_y=0.0)
+                                       zoom_start=1.10, zoom_end=1.28, pan_x=0.08, pan_y=0.0)
                     frames_to_video(frames, clip, fps=fps)
                 clip_paths.append(clip)
-                time.sleep(1.3)  # Pexels burst throttle
+                time.sleep(1.0)
             concat_stock_clips(clip_paths, silent_video, duration)
         else:
             # ── SDXL still-image path (original) ──
