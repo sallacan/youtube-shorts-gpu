@@ -11,6 +11,7 @@ import random
 import torch
 import torchaudio
 import time
+import math
 
 from PIL import Image
 from diffusers import StableDiffusionXLPipeline
@@ -133,6 +134,31 @@ def ken_burns(frame_array: np.ndarray, total_frames: int,
         )
         frames.append(pil_img)
 
+    return frames
+
+
+def wiggle_zoom(frame_array, total_frames, out_w=720, out_h=1280,
+                base=1.12, amp=0.07, cycles=2.5):
+    """Pulsing 'wiggle' zoom on a still: scale oscillates base +/- amp."""
+    src_img = Image.fromarray(frame_array)
+    h, w = frame_array.shape[:2]
+    frames = []
+    for i in range(total_frames):
+        t = i / max(total_frames - 1, 1)
+        scale = base + amp * math.sin(2.0 * math.pi * cycles * t)
+        crop_w = out_w / scale
+        crop_h = out_h / scale
+        cx = w / 2.0
+        cy = h / 2.0
+        cx = max(crop_w / 2.0, min(w - crop_w / 2.0, cx))
+        cy = max(crop_h / 2.0, min(h - crop_h / 2.0, cy))
+        x0 = cx - crop_w / 2.0
+        y0 = cy - crop_h / 2.0
+        pil_img = src_img.transform(
+            (out_w, out_h), Image.AFFINE,
+            (1.0 / scale, 0.0, x0, 0.0, 1.0 / scale, y0),
+            resample=Image.BICUBIC)
+        frames.append(pil_img)
     return frames
 
 
@@ -290,16 +316,18 @@ def pexels_search_videos(query, api_key, timeout=20):
     url = ("https://api.pexels.com/videos/search?query="
            + urllib.parse.quote(query) + "&orientation=portrait&per_page=15")
     data = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             req = urllib.request.Request(url, headers={"Authorization": api_key})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = json.load(r)
             break
         except Exception as e:
-            if attempt < 2:
-                time.sleep(3); continue
-            print(f"[PEXELS] search failed for {query!r}: {e}")
+            code = getattr(e, "code", None)
+            wait = 12 if code in (429, 403) else 3
+            if attempt < 3:
+                time.sleep(wait); continue
+            print(f"[PEXELS] video search FAILED for {query!r}: {e}")
             return []
     out = []
     for v in (data.get("videos") or []):
@@ -352,16 +380,18 @@ def pexels_search_photos(query, api_key, timeout=20):
     url = ("https://api.pexels.com/v1/search?query="
            + urllib.parse.quote(query) + "&orientation=portrait&per_page=15")
     data = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             req = urllib.request.Request(url, headers={"Authorization": api_key})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = json.load(r)
             break
         except Exception as e:
-            if attempt < 2:
-                time.sleep(3); continue
-            print(f"[PEXELS] photo search failed for {query!r}: {e}")
+            code = getattr(e, "code", None)
+            wait = 12 if code in (429, 403) else 3
+            if attempt < 3:
+                time.sleep(wait); continue
+            print(f"[PEXELS] photo search FAILED for {query!r}: {e}")
             return []
     out = []
     for p in (data.get("photos") or []):
@@ -387,8 +417,7 @@ def build_photo_clip(query, api_key, out_path, duration, w, h, used, fps):
             try: os.remove(raw)
             except Exception: pass
             continue
-        frames = ken_burns(np.array(img), int(duration * fps), out_w=w, out_h=h,
-                           zoom_start=1.08, zoom_end=1.26, pan_x=0.08, pan_y=0.0)
+        frames = wiggle_zoom(np.array(img), int(duration * fps), out_w=w, out_h=h)
         frames_to_video(frames, out_path, fps=fps)
         try: os.remove(raw)
         except Exception: pass
@@ -518,32 +547,29 @@ def run_job(job_input: dict) -> dict:
             print(f"[JOB {job_id}] Step 3-4: STOCK ({n_seg} clips: video>photo>AI)")
             used = set()
             clip_paths = []
+            stock_srcs = []
             for i in range(n_seg):
                 scene = scenes[i % num_scenes]
                 clip = os.path.join(work_dir, f"seg_{i}.mp4")
                 cdur = seg_dur + 0.3
-                # 1) real VIDEO (plays natively)
                 ok = build_stock_clip(scene, pexels_key, clip, cdur, OUT_W, OUT_H, used)
                 if not ok:
                     ok = build_stock_clip(" ".join(scene.split()[:3]), pexels_key, clip, cdur, OUT_W, OUT_H, used)
                 src_kind = "video"
-                # 2) real PHOTO (Ken Burns)
                 if not ok:
                     ok = build_photo_clip(scene, pexels_key, clip, cdur, OUT_W, OUT_H, used, fps)
                     src_kind = "photo"
-                # 3) AI image (Ken Burns) - last resort
                 if not ok:
                     src_kind = "ai"
                     pipe = get_sdxl()
                     img = generate_image(scene, pipe)
                     src_img = Image.fromarray(img).resize((900, 1600), Image.BICUBIC)
-                    frames = ken_burns(np.array(src_img), int(cdur * fps),
-                                       out_w=OUT_W, out_h=OUT_H,
-                                       zoom_start=1.08, zoom_end=1.26, pan_x=0.08, pan_y=0.0)
+                    frames = wiggle_zoom(np.array(src_img), int(cdur * fps), out_w=OUT_W, out_h=OUT_H)
                     frames_to_video(frames, clip, fps=fps)
                 print(f"[JOB {job_id}]   seg {i+1}/{n_seg} [{src_kind}]: {scene[:45]}")
+                stock_srcs.append(src_kind)
                 clip_paths.append(clip)
-                time.sleep(1.0)
+                time.sleep(2.5)
             concat_stock_clips(clip_paths, silent_video, duration)
         else:
             # ── SDXL still-image path (original) ──
@@ -749,6 +775,7 @@ def run_job(job_input: dict) -> dict:
 
         return {
             "job_id": job_id,
+            "srcs": (stock_srcs if 'stock_srcs' in dir() else None),
             "video_url": video_url,
             "duration": round(duration, 2),
             "scenes": num_scenes,
