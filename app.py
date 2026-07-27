@@ -315,14 +315,10 @@ def pexels_search_videos(query, api_key, timeout=20):
     return out
 
 
-def _normalize_clip(raw, out_path, duration, w, h, zoom=True):
-    """ffmpeg: fill w x h, exactly `duration` sec, no audio, optional slow push-in zoom."""
-    base = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1"
-    if zoom:
-        vf = (base + f",zoompan=z='min(zoom+0.0009,1.18)':d=1:"
-              f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':fps=30:s={w}x{h}")
-    else:
-        vf = base + ",fps=30"
+def _normalize_clip(raw, out_path, duration, w, h):
+    """ffmpeg: fill w x h, exactly `duration` sec, no audio. Plays the video NATIVELY
+    (no zoom/effect) so real footage motion is preserved smoothly."""
+    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30"
     cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", raw, "-t", f"{duration:.3f}",
            "-vf", vf, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
            "-preset", "veryfast", "-crf", "20", out_path]
@@ -331,7 +327,7 @@ def _normalize_clip(raw, out_path, duration, w, h, zoom=True):
 
 
 def build_stock_clip(query, api_key, out_path, duration, w=720, h=1280, used=None):
-    """Download an UNUSED Pexels clip for `query`, normalize with zoom. Tracks used URLs."""
+    """Download an UNUSED Pexels VIDEO for `query`, play natively. Tracks used URLs."""
     if used is None:
         used = set()
     for url in pexels_search_videos(query, api_key):
@@ -341,12 +337,62 @@ def build_stock_clip(query, api_key, out_path, duration, w=720, h=1280, used=Non
         r = subprocess.run(["curl", "-sL", "--max-time", "60", "-o", raw, url], capture_output=True)
         if r.returncode != 0 or not os.path.exists(raw) or os.path.getsize(raw) < 10000:
             continue
-        ok = _normalize_clip(raw, out_path, duration, w, h, zoom=True)
-        if not ok:
-            ok = _normalize_clip(raw, out_path, duration, w, h, zoom=False)
+        ok = _normalize_clip(raw, out_path, duration, w, h)
         try: os.remove(raw)
         except Exception: pass
         if ok:
+            used.add(url)
+            return True
+    return False
+
+
+def pexels_search_photos(query, api_key, timeout=20):
+    """Return a list of portrait photo URLs from the Pexels photo API."""
+    import urllib.request, urllib.parse
+    url = ("https://api.pexels.com/v1/search?query="
+           + urllib.parse.quote(query) + "&orientation=portrait&per_page=15")
+    data = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"Authorization": api_key})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.load(r)
+            break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(3); continue
+            print(f"[PEXELS] photo search failed for {query!r}: {e}")
+            return []
+    out = []
+    for p in (data.get("photos") or []):
+        src = p.get("src") or {}
+        link = src.get("large2x") or src.get("original") or src.get("large")
+        if link:
+            out.append(link)
+    return out
+
+
+def build_photo_clip(query, api_key, out_path, duration, w, h, used, fps):
+    """Download an UNUSED Pexels PHOTO and apply Ken Burns motion (zoom/pan)."""
+    for url in pexels_search_photos(query, api_key):
+        if url in used:
+            continue
+        raw = out_path + ".img"
+        r = subprocess.run(["curl", "-sL", "--max-time", "40", "-o", raw, url], capture_output=True)
+        if r.returncode != 0 or not os.path.exists(raw) or os.path.getsize(raw) < 5000:
+            continue
+        try:
+            img = Image.open(raw).convert("RGB").resize((900, 1600), Image.BICUBIC)
+        except Exception:
+            try: os.remove(raw)
+            except Exception: pass
+            continue
+        frames = ken_burns(np.array(img), int(duration * fps), out_w=w, out_h=h,
+                           zoom_start=1.08, zoom_end=1.26, pan_x=0.08, pan_y=0.0)
+        frames_to_video(frames, out_path, fps=fps)
+        try: os.remove(raw)
+        except Exception: pass
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
             used.add(url)
             return True
     return False
@@ -469,24 +515,33 @@ def run_job(job_input: dict) -> dict:
             SEG = 3.2
             n_seg = max(num_scenes, int(round(duration / SEG)))
             seg_dur = duration / n_seg
-            print(f"[JOB {job_id}] Step 3-4: STOCK video ({n_seg} clips, ~{seg_dur:.1f}s each)")
+            print(f"[JOB {job_id}] Step 3-4: STOCK ({n_seg} clips: video>photo>AI)")
             used = set()
             clip_paths = []
             for i in range(n_seg):
                 scene = scenes[i % num_scenes]
                 clip = os.path.join(work_dir, f"seg_{i}.mp4")
-                ok = build_stock_clip(scene, pexels_key, clip, seg_dur + 0.3, OUT_W, OUT_H, used)
+                cdur = seg_dur + 0.3
+                # 1) real VIDEO (plays natively)
+                ok = build_stock_clip(scene, pexels_key, clip, cdur, OUT_W, OUT_H, used)
                 if not ok:
-                    ok = build_stock_clip(" ".join(scene.split()[:3]), pexels_key, clip, seg_dur + 0.3, OUT_W, OUT_H, used)
+                    ok = build_stock_clip(" ".join(scene.split()[:3]), pexels_key, clip, cdur, OUT_W, OUT_H, used)
+                src_kind = "video"
+                # 2) real PHOTO (Ken Burns)
                 if not ok:
-                    print(f"[JOB {job_id}]   seg {i+1}: no stock clip -> SDXL fallback")
+                    ok = build_photo_clip(scene, pexels_key, clip, cdur, OUT_W, OUT_H, used, fps)
+                    src_kind = "photo"
+                # 3) AI image (Ken Burns) - last resort
+                if not ok:
+                    src_kind = "ai"
                     pipe = get_sdxl()
                     img = generate_image(scene, pipe)
                     src_img = Image.fromarray(img).resize((900, 1600), Image.BICUBIC)
-                    frames = ken_burns(np.array(src_img), int((seg_dur + 0.3) * fps),
+                    frames = ken_burns(np.array(src_img), int(cdur * fps),
                                        out_w=OUT_W, out_h=OUT_H,
-                                       zoom_start=1.10, zoom_end=1.28, pan_x=0.08, pan_y=0.0)
+                                       zoom_start=1.08, zoom_end=1.26, pan_x=0.08, pan_y=0.0)
                     frames_to_video(frames, clip, fps=fps)
+                print(f"[JOB {job_id}]   seg {i+1}/{n_seg} [{src_kind}]: {scene[:45]}")
                 clip_paths.append(clip)
                 time.sleep(1.0)
             concat_stock_clips(clip_paths, silent_video, duration)
