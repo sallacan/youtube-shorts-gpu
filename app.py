@@ -354,6 +354,65 @@ def _normalize_clip(raw, out_path, duration, w, h):
     return r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 10000
 
 
+def _dl(url, raw_path, timeout=60):
+    """Download a URL to raw_path with curl. True if a non-trivial file lands."""
+    r = subprocess.run(["curl", "-sL", "--max-time", str(timeout), "-o", raw_path, url],
+                       capture_output=True)
+    return r.returncode == 0 and os.path.exists(raw_path) and os.path.getsize(raw_path) > 10000
+
+
+def _fit_cover(img, tw, th):
+    """Resize+center-crop a PIL image to exactly tw x th (cover)."""
+    iw, ih = img.size
+    scale = max(tw / iw, th / ih)
+    nw, nh = int(iw * scale + 0.5), int(ih * scale + 0.5)
+    img = img.resize((nw, nh), Image.BICUBIC)
+    left = (nw - tw) // 2
+    top = (nh - th) // 2
+    return img.crop((left, top, left + tw, top + th))
+
+
+def clip_from_video_urls(urls, out_path, duration, w, h, used):
+    """Download the first UNUSED pre-resolved Pexels CDN video URL; play natively."""
+    for url in (urls or []):
+        if url in used:
+            continue
+        raw = out_path + ".raw"
+        if not _dl(url, raw):
+            continue
+        ok = _normalize_clip(raw, out_path, duration, w, h)
+        try: os.remove(raw)
+        except Exception: pass
+        if ok:
+            used.add(url)
+            return True
+    return False
+
+
+def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps):
+    """Download the first UNUSED pre-resolved Pexels CDN photo URL; apply wiggle zoom."""
+    for url in (urls or []):
+        if url in used:
+            continue
+        raw = out_path + ".jpg"
+        if not _dl(url, raw):
+            continue
+        try:
+            img = Image.open(raw).convert("RGB")
+        except Exception:
+            try: os.remove(raw)
+            except Exception: pass
+            continue
+        img = _fit_cover(img, 900, 1600)
+        frames = wiggle_zoom(np.array(img), int(duration * fps), out_w=w, out_h=h)
+        frames_to_video(frames, out_path, fps=fps)
+        try: os.remove(raw)
+        except Exception: pass
+        used.add(url)
+        return True
+    return False
+
+
 def build_stock_clip(query, api_key, out_path, duration, w=720, h=1280, used=None):
     """Download an UNUSED Pexels VIDEO for `query`, play natively. Tracks used URLs."""
     if used is None:
@@ -579,25 +638,28 @@ def run_job(job_input: dict) -> dict:
         render_mode = job_input.get("render_mode", "sdxl")
         pexels_key = os.environ.get("PEXELS_API_KEY", "").strip()
 
-        if render_mode == "stock" and pexels_key:
-            SEG = 3.2
-            n_seg = max(num_scenes, int(round(duration / SEG)))
+        # Pre-resolved Pexels CDN URLs from n8n/Contabo (worker never calls the API).
+        scene_videos = job_input.get("scene_videos") or []
+        scene_photos = job_input.get("scene_photos") or []
+
+        if render_mode == "stock":
+            n_seg = num_scenes
             seg_dur = duration / n_seg
-            print(f"[JOB {job_id}] Step 3-4: STOCK ({n_seg} clips: video>photo>AI)")
+            print(f"[JOB {job_id}] Step 3-4: STOCK ({n_seg} clips: video>photo>AI, pre-resolved URLs)")
             used = set()
             clip_paths = []
             stock_srcs = []
             for i in range(n_seg):
-                scene = scenes[i % num_scenes]
+                scene = scenes[i]
                 clip = os.path.join(work_dir, f"seg_{i}.mp4")
                 cdur = seg_dur + 0.3
-                ok = build_stock_clip(scene, pexels_key, clip, cdur, OUT_W, OUT_H, used)
-                if not ok:
-                    ok = build_stock_clip(" ".join(scene.split()[:3]), pexels_key, clip, cdur, OUT_W, OUT_H, used)
+                vids = scene_videos[i] if i < len(scene_videos) else []
+                phos = scene_photos[i] if i < len(scene_photos) else []
                 src_kind = "video"
+                ok = clip_from_video_urls(vids, clip, cdur, OUT_W, OUT_H, used)
                 if not ok:
-                    ok = build_photo_clip(scene, pexels_key, clip, cdur, OUT_W, OUT_H, used, fps)
                     src_kind = "photo"
+                    ok = clip_from_photo_urls(phos, clip, cdur, OUT_W, OUT_H, used, fps)
                 if not ok:
                     src_kind = "ai"
                     pipe = get_sdxl()
@@ -608,7 +670,6 @@ def run_job(job_input: dict) -> dict:
                 print(f"[JOB {job_id}]   seg {i+1}/{n_seg} [{src_kind}]: {scene[:45]}")
                 stock_srcs.append(src_kind)
                 clip_paths.append(clip)
-                time.sleep(2.5)
             concat_stock_clips(clip_paths, silent_video, duration)
         else:
             # ── SDXL still-image path (original) ──
