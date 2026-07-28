@@ -468,6 +468,38 @@ def run_job(job_input: dict) -> dict:
         job_id      (str, optional) - auto-generated if missing
     """
     job_id = job_input.get("job_id") or str(uuid.uuid4())[:8]
+
+    # ── FAST NETWORK DIAGNOSTIC (no render) ──────────────────────────────
+    if job_input.get("diag_net"):
+        import urllib.request, urllib.parse
+        pk = os.environ.get("PEXELS_API_KEY", "").strip()
+        res = {"pexels_key_len": len(pk)}
+        # (a) Pexels API search from the worker
+        try:
+            u = ("https://api.pexels.com/videos/search?query="
+                 + urllib.parse.quote("desert landscape") + "&orientation=portrait&per_page=3")
+            rq = urllib.request.Request(u, headers={"Authorization": pk})
+            with urllib.request.urlopen(rq, timeout=20) as r:
+                body = json.load(r)
+            res["pexels_api"] = {"http": 200, "total": body.get("total_results"),
+                                 "n": len(body.get("videos") or []),
+                                 "sample_file": ((body.get("videos") or [{}])[0].get("video_files") or [{}])[0].get("link")}
+        except Exception as e:
+            res["pexels_api"] = {"http": getattr(e, "code", None), "err": str(e)[:200]}
+        # (b) can the worker download a real Pexels CDN video file?
+        cdn = res.get("pexels_api", {}).get("sample_file")
+        if cdn:
+            rr = subprocess.run(["curl", "-sL", "-o", "/tmp/diag.mp4", "--max-time", "40",
+                                 "-w", "%{http_code}", cdn], capture_output=True, text=True)
+            sz = os.path.getsize("/tmp/diag.mp4") if os.path.exists("/tmp/diag.mp4") else 0
+            res["pexels_cdn_download"] = {"curl_rc": rr.returncode, "http": rr.stdout[-3:], "bytes": sz}
+        # (c) sanity: general internet egress (catbox worked before)
+        gg = subprocess.run(["curl", "-sL", "-o", "/dev/null", "--max-time", "20",
+                             "-w", "%{http_code}", "https://www.google.com"], capture_output=True, text=True)
+        res["google_egress"] = gg.stdout[-3:]
+        return {"job_id": job_id, "diag_net": res}
+    # ─────────────────────────────────────────────────────────────────────
+
     narration = job_input["narration"]
     scenes = job_input["scenes"]
     title = job_input.get("title", "video")
