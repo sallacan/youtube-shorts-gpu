@@ -354,11 +354,21 @@ def _normalize_clip(raw, out_path, duration, w, h):
     return r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 10000
 
 
-def _dl(url, raw_path, timeout=60):
-    """Download a URL to raw_path with curl. True if a non-trivial file lands."""
-    r = subprocess.run(["curl", "-sL", "--max-time", str(timeout), "-o", raw_path, url],
-                       capture_output=True)
-    return r.returncode == 0 and os.path.exists(raw_path) and os.path.getsize(raw_path) > 10000
+_DL_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+
+
+def _dl(url, raw_path, timeout=60, tries=3):
+    """Download a URL to raw_path with curl (browser UA + retry/backoff).
+    images.pexels.com rejects the default curl UA and throttles bursts, so we
+    send a real UA and retry with backoff. True if a non-trivial file lands."""
+    for attempt in range(tries):
+        r = subprocess.run(["curl", "-sL", "-A", _DL_UA, "--max-time", str(timeout),
+                            "-o", raw_path, url], capture_output=True)
+        if r.returncode == 0 and os.path.exists(raw_path) and os.path.getsize(raw_path) > 10000:
+            return True
+        time.sleep(2 * (attempt + 1))
+    return False
 
 
 def _fit_cover(img, tw, th):
