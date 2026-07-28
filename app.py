@@ -497,6 +497,13 @@ def run_job(job_input: dict) -> dict:
         gg = subprocess.run(["curl", "-sL", "-o", "/dev/null", "--max-time", "20",
                              "-w", "%{http_code}", "https://www.google.com"], capture_output=True, text=True)
         res["google_egress"] = gg.stdout[-3:]
+        # (d) can the worker download from the Pexels CDN (videos.pexels.com)?
+        turl = job_input.get("cdn_test")
+        if turl:
+            rr = subprocess.run(["curl", "-sL", "-o", "/tmp/cdn.mp4", "--max-time", "40",
+                                 "-w", "%{http_code}", turl], capture_output=True, text=True)
+            sz = os.path.getsize("/tmp/cdn.mp4") if os.path.exists("/tmp/cdn.mp4") else 0
+            res["pexels_cdn_download"] = {"curl_rc": rr.returncode, "http": rr.stdout[-3:], "bytes": sz}
         return {"job_id": job_id, "diag_net": res}
     # ─────────────────────────────────────────────────────────────────────
 
