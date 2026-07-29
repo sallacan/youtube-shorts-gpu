@@ -137,19 +137,44 @@ def ken_burns(frame_array: np.ndarray, total_frames: int,
     return frames
 
 
+def _smooth_noise(total_frames, fps, freq, amp, seed):
+    """AE-style wiggle: smooth pseudo-random 1-D noise. `freq` cycles/sec,
+    `amp` peak offset. Random control points interpolated with smoothstep."""
+    rng = random.Random(seed)
+    step = max(fps / max(freq, 0.01), 1.0)          # frames per control point
+    n_ctrl = int(total_frames / step) + 3
+    pts = [rng.uniform(-1.0, 1.0) for _ in range(n_ctrl)]
+    out = []
+    for i in range(total_frames):
+        p = i / step
+        k = int(p)
+        f = p - k
+        f = f * f * (3.0 - 2.0 * f)                  # smoothstep easing
+        val = pts[k] + (pts[k + 1] - pts[k]) * f
+        out.append(val * amp)
+    return out
+
+
 def wiggle_zoom(frame_array, total_frames, out_w=720, out_h=1280,
-                base=1.12, amp=0.07, cycles=2.5):
-    """Pulsing 'wiggle' zoom on a still: scale oscillates base +/- amp."""
+                base=1.12, amp=0.07, cycles=2.5,
+                fps=30, pos_freq=2.0, pos_amp=50.0, seed=None):
+    """Pulsing 'wiggle' zoom + AE-style position wiggle on a still.
+    Zoom: scale oscillates base +/- amp over `cycles`.
+    Position: organic x/y jitter, `pos_freq` wiggles/sec, `pos_amp` px peak."""
     src_img = Image.fromarray(frame_array)
     h, w = frame_array.shape[:2]
+    if seed is None:
+        seed = (int(frame_array[:4, :4, 0].sum()) if frame_array.size else 0)
+    dx = _smooth_noise(total_frames, fps, pos_freq, pos_amp, seed + 1)
+    dy = _smooth_noise(total_frames, fps, pos_freq, pos_amp, seed + 2)
     frames = []
     for i in range(total_frames):
         t = i / max(total_frames - 1, 1)
         scale = base + amp * math.sin(2.0 * math.pi * cycles * t)
         crop_w = out_w / scale
         crop_h = out_h / scale
-        cx = w / 2.0
-        cy = h / 2.0
+        cx = w / 2.0 + dx[i]
+        cy = h / 2.0 + dy[i]
         cx = max(crop_w / 2.0, min(w - crop_w / 2.0, cx))
         cy = max(crop_h / 2.0, min(h - crop_h / 2.0, cy))
         x0 = cx - crop_w / 2.0
