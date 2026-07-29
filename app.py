@@ -371,10 +371,17 @@ def pexels_search_videos(query, api_key, timeout=20):
 def _normalize_clip(raw, out_path, duration, w, h):
     """ffmpeg: fill w x h, exactly `duration` sec, no audio. Plays the video NATIVELY
     (no zoom/effect) so real footage motion is preserved smoothly."""
-    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30"
+    # Show the WHOLE clip (contain) centered over a blurred fill of itself, so
+    # horizontal/landscape videos fill the 9:16 frame cleanly instead of being
+    # hard-cropped to a narrow centre strip.
+    fc = (f"[0:v]split=2[bg][fg];"
+          f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
+          f"boxblur=22:1,eq=brightness=-0.15[b];"
+          f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease[f];"
+          f"[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30[v]")
     cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", raw, "-t", f"{duration:.3f}",
-           "-vf", vf, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-           "-preset", "veryfast", "-crf", "20", out_path]
+           "-filter_complex", fc, "-map", "[v]", "-an", "-c:v", "libx264",
+           "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "20", out_path]
     r = subprocess.run(cmd, capture_output=True)
     return r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 10000
 
@@ -405,6 +412,11 @@ def _fit_cover(img, tw, th):
     left = (nw - tw) // 2
     top = (nh - th) // 2
     return img.crop((left, top, left + tw, top + th))
+
+
+# One mild wiggle used for EVERY still (cover, contain, and AI) so motion is
+# uniform across the whole video. Do not diverge these per scene.
+MILD_WIGGLE = dict(base=1.08, amp=0.04, cycles=1.5, pos_freq=1.2, pos_amp=16)
 
 
 def _fit_contain_blur(img, tw, th, margin=0.90):
@@ -460,12 +472,9 @@ def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps, fit="cover")
         n = int(duration * fps)
         if fit == "contain":
             img = _fit_contain_blur(img, 900, 1600)
-            frames = wiggle_zoom(np.array(img), n, out_w=w, out_h=h,
-                                 base=1.08, amp=0.04, cycles=1.5,
-                                 fps=fps, pos_freq=1.2, pos_amp=16)
         else:
             img = _fit_cover(img, 900, 1600)
-            frames = wiggle_zoom(np.array(img), n, out_w=w, out_h=h, fps=fps)
+        frames = wiggle_zoom(np.array(img), n, out_w=w, out_h=h, fps=fps, **MILD_WIGGLE)
         frames_to_video(frames, out_path, fps=fps)
         try: os.remove(raw)
         except Exception: pass
@@ -758,7 +767,8 @@ def run_job(job_input: dict) -> dict:
                     pipe = get_sdxl()
                     img = generate_image(scene, pipe)
                     src_img = Image.fromarray(img).resize((900, 1600), Image.BICUBIC)
-                    frames = wiggle_zoom(np.array(src_img), int(cdur * fps), out_w=OUT_W, out_h=OUT_H, fps=fps)
+                    frames = wiggle_zoom(np.array(src_img), int(cdur * fps), out_w=OUT_W, out_h=OUT_H,
+                                         fps=fps, **MILD_WIGGLE)
                     frames_to_video(frames, clip, fps=fps)
                 print(f"[JOB {job_id}]   seg {i+1}/{n_seg} [{src_kind}]: {scene[:45]}")
                 stock_srcs.append(src_kind)
