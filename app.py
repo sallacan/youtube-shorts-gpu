@@ -407,6 +407,22 @@ def _fit_cover(img, tw, th):
     return img.crop((left, top, left + tw, top + th))
 
 
+def _fit_contain_blur(img, tw, th, margin=0.90):
+    """Show the WHOLE image (contain) centered over a blurred, darkened cover of
+    itself. Used for landmark/geoglyph shots that must be seen in full even when
+    the source is landscape and the output is vertical."""
+    from PIL import ImageFilter, ImageEnhance
+    bg = _fit_cover(img, tw, th).filter(ImageFilter.GaussianBlur(30))
+    bg = ImageEnhance.Brightness(bg).enhance(0.55)
+    iw, ih = img.size
+    s = min(tw * margin / iw, th * margin / ih)
+    nw, nh = max(1, int(iw * s + 0.5)), max(1, int(ih * s + 0.5))
+    fg = img.resize((nw, nh), Image.BICUBIC)
+    canvas = bg.copy()
+    canvas.paste(fg, ((tw - nw) // 2, (th - nh) // 2))
+    return canvas
+
+
 def clip_from_video_urls(urls, out_path, duration, w, h, used):
     """Download the first UNUSED pre-resolved Pexels CDN video URL; play natively."""
     for url in (urls or []):
@@ -424,8 +440,11 @@ def clip_from_video_urls(urls, out_path, duration, w, h, used):
     return False
 
 
-def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps):
-    """Download the first UNUSED pre-resolved Pexels CDN photo URL; apply wiggle zoom."""
+def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps, fit="cover"):
+    """Download the first UNUSED pre-resolved photo URL; apply wiggle zoom.
+    fit="cover"  -> fill frame, full wiggle (good for textured scenery).
+    fit="contain"-> show WHOLE image over blurred bg, gentle wiggle so the
+                    subject (e.g. a geoglyph) stays framed and readable."""
     for url in (urls or []):
         if url in used:
             continue
@@ -438,8 +457,15 @@ def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps):
             try: os.remove(raw)
             except Exception: pass
             continue
-        img = _fit_cover(img, 900, 1600)
-        frames = wiggle_zoom(np.array(img), int(duration * fps), out_w=w, out_h=h)
+        n = int(duration * fps)
+        if fit == "contain":
+            img = _fit_contain_blur(img, 900, 1600)
+            frames = wiggle_zoom(np.array(img), n, out_w=w, out_h=h,
+                                 base=1.08, amp=0.04, cycles=1.5,
+                                 fps=fps, pos_freq=1.2, pos_amp=16)
+        else:
+            img = _fit_cover(img, 900, 1600)
+            frames = wiggle_zoom(np.array(img), n, out_w=w, out_h=h, fps=fps)
         frames_to_video(frames, out_path, fps=fps)
         try: os.remove(raw)
         except Exception: pass
@@ -676,6 +702,7 @@ def run_job(job_input: dict) -> dict:
         # Pre-resolved Pexels CDN URLs from n8n/Contabo (worker never calls the API).
         scene_videos = job_input.get("scene_videos") or []
         scene_photos = job_input.get("scene_photos") or []
+        scene_fit = job_input.get("scene_fit") or []   # per-scene "cover"|"contain"
 
         if render_mode == "stock":
             n_seg = num_scenes
@@ -690,17 +717,18 @@ def run_job(job_input: dict) -> dict:
                 cdur = seg_dur + 0.3
                 vids = scene_videos[i] if i < len(scene_videos) else []
                 phos = scene_photos[i] if i < len(scene_photos) else []
+                fit = scene_fit[i] if i < len(scene_fit) else "cover"
                 src_kind = "video"
                 ok = clip_from_video_urls(vids, clip, cdur, OUT_W, OUT_H, used)
                 if not ok:
                     src_kind = "photo"
-                    ok = clip_from_photo_urls(phos, clip, cdur, OUT_W, OUT_H, used, fps)
+                    ok = clip_from_photo_urls(phos, clip, cdur, OUT_W, OUT_H, used, fps, fit=fit)
                 if not ok:
                     src_kind = "ai"
                     pipe = get_sdxl()
                     img = generate_image(scene, pipe)
                     src_img = Image.fromarray(img).resize((900, 1600), Image.BICUBIC)
-                    frames = wiggle_zoom(np.array(src_img), int(cdur * fps), out_w=OUT_W, out_h=OUT_H)
+                    frames = wiggle_zoom(np.array(src_img), int(cdur * fps), out_w=OUT_W, out_h=OUT_H, fps=fps)
                     frames_to_video(frames, clip, fps=fps)
                 print(f"[JOB {job_id}]   seg {i+1}/{n_seg} [{src_kind}]: {scene[:45]}")
                 stock_srcs.append(src_kind)
