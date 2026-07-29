@@ -157,12 +157,16 @@ def _smooth_noise(total_frames, fps, freq, amp, seed):
 
 def wiggle_zoom(frame_array, total_frames, out_w=720, out_h=1280,
                 base=1.12, amp=0.07, cycles=2.5,
-                fps=30, pos_freq=2.0, pos_amp=50.0, seed=None):
+                fps=30, pos_freq=2.0, pos_amp=50.0, seed=None, zoom_freq=None):
     """Pulsing 'wiggle' zoom + AE-style position wiggle on a still.
-    Zoom: scale oscillates base +/- amp over `cycles`.
+    Zoom: scale oscillates base +/- amp. Pass `zoom_freq` (pulses/sec) for a
+    CONSTANT pulse speed independent of clip length (so short end-scenes don't
+    speed up); otherwise `cycles` is a fixed count over the whole clip.
     Position: organic x/y jitter, `pos_freq` wiggles/sec, `pos_amp` px peak."""
     src_img = Image.fromarray(frame_array)
     h, w = frame_array.shape[:2]
+    if zoom_freq is not None:
+        cycles = zoom_freq * (total_frames / float(fps))   # constant speed/sec
     if seed is None:
         seed = (int(frame_array[:4, :4, 0].sum()) if frame_array.size else 0)
     dx = _smooth_noise(total_frames, fps, pos_freq, pos_amp, seed + 1)
@@ -415,8 +419,9 @@ def _fit_cover(img, tw, th):
 
 
 # One mild wiggle used for EVERY still (cover, contain, and AI) so motion is
-# uniform across the whole video. Do not diverge these per scene.
-MILD_WIGGLE = dict(base=1.08, amp=0.04, cycles=1.5, pos_freq=1.2, pos_amp=16)
+# uniform across the whole video. zoom_freq is per-SECOND, so the pulse speed is
+# identical on every scene regardless of how long that scene is (no end speed-up).
+MILD_WIGGLE = dict(base=1.08, amp=0.04, zoom_freq=0.5, pos_freq=1.2, pos_amp=16)
 
 
 def _fit_contain_blur(img, tw, th, margin=0.90):
@@ -470,7 +475,10 @@ def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps, fit="cover")
             except Exception: pass
             continue
         n = int(duration * fps)
-        if fit == "contain":
+        iw, ih = img.size
+        # Landscape source can't fill a 9:16 frame without a harsh crop, so show
+        # it whole over a blurred fill (auto, even if the scene wasn't flagged).
+        if fit == "contain" or iw > ih:
             img = _fit_contain_blur(img, 900, 1600)
         else:
             img = _fit_cover(img, 900, 1600)
