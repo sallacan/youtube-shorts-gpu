@@ -375,17 +375,21 @@ def pexels_search_videos(query, api_key, timeout=20):
 def _normalize_clip(raw, out_path, duration, w, h):
     """ffmpeg: fill w x h, exactly `duration` sec, no audio. Plays the video NATIVELY
     (no zoom/effect) so real footage motion is preserved smoothly."""
-    # Show the WHOLE clip (contain) centered over a blurred fill of itself, so
-    # horizontal/landscape videos fill the 9:16 frame cleanly instead of being
-    # hard-cropped to a narrow centre strip.
-    fc = (f"[0:v]split=2[bg][fg];"
-          f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
-          f"boxblur=22:1,eq=brightness=-0.15[b];"
-          f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease[f];"
-          f"[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30[v]")
+    # Rotate landscape clips 90° so they fill the 9:16 frame with real content.
+    land = False
+    try:
+        pr = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                             "-show_entries", "stream=width,height", "-of", "csv=p=0", raw],
+                            capture_output=True, text=True)
+        vw, vh = [int(x) for x in pr.stdout.strip().split(",")[:2]]
+        land = vw > vh
+    except Exception:
+        land = False
+    pre = "transpose=1," if land else ""   # 90° clockwise for landscape
+    vf = f"{pre}scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30"
     cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", raw, "-t", f"{duration:.3f}",
-           "-filter_complex", fc, "-map", "[v]", "-an", "-c:v", "libx264",
-           "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "20", out_path]
+           "-vf", vf, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+           "-preset", "veryfast", "-crf", "20", out_path]
     r = subprocess.run(cmd, capture_output=True)
     return r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 10000
 
@@ -476,12 +480,11 @@ def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps, fit="cover")
             continue
         n = int(duration * fps)
         iw, ih = img.size
-        # Landscape source can't fill a 9:16 frame without a harsh crop, so show
-        # it whole over a blurred fill (auto, even if the scene wasn't flagged).
-        if fit == "contain" or iw > ih:
-            img = _fit_contain_blur(img, 900, 1600)
-        else:
-            img = _fit_cover(img, 900, 1600)
+        # Rotate landscape media 90° so it fills the 9:16 frame with real content
+        # (no blurred bars). Aerial/top-down shots read fine rotated.
+        if iw > ih:
+            img = img.transpose(Image.ROTATE_270)   # 90° clockwise
+        img = _fit_cover(img, 900, 1600)
         frames = wiggle_zoom(np.array(img), n, out_w=w, out_h=h, fps=fps, **MILD_WIGGLE)
         frames_to_video(frames, out_path, fps=fps)
         try: os.remove(raw)
