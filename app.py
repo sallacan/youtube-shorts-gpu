@@ -547,6 +547,35 @@ def build_photo_clip(query, api_key, out_path, duration, w, h, used, fps):
     return False
 
 
+def compute_scene_durations(scene_texts, words, total_duration, n_seg):
+    """Per-scene durations aligned to WHEN the narration is spoken.
+    scene_texts[i] is the narration chunk for scene i (they concatenate to the
+    full narration). We split the whisper word list proportionally by each
+    chunk's word count and read the real spoken start times, so each image
+    lands exactly on its words. Falls back to even split if unavailable."""
+    if not (scene_texts and len(scene_texts) == n_seg and words):
+        return [total_duration / n_seg] * n_seg
+    counts = [max(len(t.split()), 1) for t in scene_texts]
+    tot = float(sum(counts))
+    nw = len(words)
+    bounds = [0]
+    acc = 0
+    for c in counts[:-1]:
+        acc += c
+        bounds.append(min(nw, max(bounds[-1] + 1, int(round(acc / tot * nw)))))
+    bounds.append(nw)
+    starts = []
+    for i in range(n_seg):
+        wi = bounds[i]
+        starts.append(float(words[wi]["start"]) if wi < nw else total_duration)
+    starts[0] = 0.0
+    durs = []
+    for i in range(n_seg):
+        end = starts[i + 1] if i + 1 < n_seg else total_duration
+        durs.append(max(0.4, end - starts[i]))
+    return durs
+
+
 def concat_stock_clips(clip_paths, out_path, duration):
     listfile = out_path + ".txt"
     with open(listfile, "w") as f:
@@ -706,15 +735,16 @@ def run_job(job_input: dict) -> dict:
 
         if render_mode == "stock":
             n_seg = num_scenes
-            seg_dur = duration / n_seg
-            print(f"[JOB {job_id}] Step 3-4: STOCK ({n_seg} clips: video>photo>AI, pre-resolved URLs)")
+            scene_texts = job_input.get("scene_texts") or []
+            seg_durs = compute_scene_durations(scene_texts, words, duration, n_seg)
+            print(f"[JOB {job_id}] Step 3-4: STOCK ({n_seg} clips, word_aligned={bool(scene_texts)})")
             used = set()
             clip_paths = []
             stock_srcs = []
             for i in range(n_seg):
                 scene = scenes[i]
                 clip = os.path.join(work_dir, f"seg_{i}.mp4")
-                cdur = seg_dur + 0.3
+                cdur = seg_durs[i]   # exact, no accumulating pad → stays aligned
                 vids = scene_videos[i] if i < len(scene_videos) else []
                 phos = scene_photos[i] if i < len(scene_photos) else []
                 fit = scene_fit[i] if i < len(scene_fit) else "cover"
