@@ -253,7 +253,8 @@ def extend_word_gaps(words: list, max_gap: float = 0.8) -> list:
 
 
 def words_to_ass(words: list, duration: float, font_name: str = "Arial",
-                 font_size: int = 72, output_path: str = None) -> str:
+                 font_size: int = 72, output_path: str = None,
+                 margin_v: int = 320) -> str:
     if output_path is None:
         output_path = tempfile.mktemp(suffix=".ass")
 
@@ -265,7 +266,7 @@ Timer: 100.0000
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,20,20,512,1
+Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,20,20,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -811,7 +812,8 @@ def run_job(job_input: dict) -> dict:
         print(f"[JOB {job_id}] Step 5: Subtitles")
         ass_path = os.path.join(work_dir, "subs.ass")
         words_to_ass(words, duration, font_name=font_name, font_size=font_size,
-                     output_path=ass_path)
+                     output_path=ass_path,
+                     margin_v=int(job_input.get("caption_margin_v", 320)))
 
         # ── STEP 6: Mix audio ─────────────────────────────────────────────
         print(f"[JOB {job_id}] Step 6: Audio mix")
