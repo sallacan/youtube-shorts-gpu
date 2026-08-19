@@ -80,7 +80,13 @@ def generate_image(prompt: str, pipe, width=720, height=1280) -> np.ndarray:
         negative_prompt=(
             "nsfw, nudity, nude, naked, topless, bare skin, exposed skin, lingerie, "
             "underwear, bikini, cleavage, sexual, suggestive, erotic, provocative, "
-            "revealing clothing, blurry, low quality, distorted, watermark, text, logo"
+            "revealing clothing, "
+            # graphic / violent content guard (YouTube strike risk)
+            "gore, blood, bloody, wound, wounds, open wound, injury, injured, mutilated, "
+            "dead animal, dead body, corpse, carcass, roadkill, emaciated, starving, "
+            "disease, infected, tar-covered, oil-covered, suffering, dying, violence, "
+            "gruesome, disturbing, graphic, distressing, "
+            "blurry, low quality, distorted, watermark, text, logo"
         ),
         width=width,
         height=height,
@@ -373,9 +379,11 @@ def pexels_search_videos(query, api_key, timeout=20):
     return out
 
 
-def _normalize_clip(raw, out_path, duration, w, h):
-    """ffmpeg: fill w x h, exactly `duration` sec, no audio. Plays the video NATIVELY
-    (no zoom/effect) so real footage motion is preserved smoothly."""
+def _normalize_clip(raw, out_path, duration, w, h, wiggle=False):
+    """ffmpeg: fill w x h, exactly `duration` sec, no audio. The video keeps PLAYING
+    (each frame is cropped from the moving source, never frozen). When `wiggle` is on,
+    the crop window gently oscillates so the clip gets the same subtle wiggle motion as
+    the stills - applied on top of the footage, not a freeze-zoom."""
     # Rotate landscape clips 90° so they fill the 9:16 frame with real content.
     land = False
     try:
@@ -387,7 +395,16 @@ def _normalize_clip(raw, out_path, duration, w, h):
     except Exception:
         land = False
     pre = "transpose=1," if land else ""   # 90° clockwise for landscape
-    vf = f"{pre}scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30"
+    if wiggle:
+        # scale to fill with headroom, then crop a w x h window whose position
+        # oscillates gently (AE-style wiggle) - the source keeps playing underneath.
+        S, A = 1.14, 14.0
+        bw, bh = int(w * S), int(h * S)
+        vf = (f"{pre}scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
+              f"crop={w}:{h}:x='(in_w-out_w)/2 + {A}*sin(2*PI*1.1*t)':"
+              f"y='(in_h-out_h)/2 + {A}*sin(2*PI*0.9*t+1.0)',setsar=1,fps=30")
+    else:
+        vf = f"{pre}scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30"
     cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", raw, "-t", f"{duration:.3f}",
            "-vf", vf, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
            "-preset", "veryfast", "-crf", "20", out_path]
@@ -445,15 +462,16 @@ def _fit_contain_blur(img, tw, th, margin=0.90):
     return canvas
 
 
-def clip_from_video_urls(urls, out_path, duration, w, h, used):
-    """Download the first UNUSED pre-resolved Pexels CDN video URL; play natively."""
+def clip_from_video_urls(urls, out_path, duration, w, h, used, wiggle=False):
+    """Download the first UNUSED pre-resolved Pexels CDN video URL; play natively
+    (with an optional gentle wiggle applied on top)."""
     for url in (urls or []):
         if url in used:
             continue
         raw = out_path + ".raw"
         if not _dl(url, raw):
             continue
-        ok = _normalize_clip(raw, out_path, duration, w, h)
+        ok = _normalize_clip(raw, out_path, duration, w, h, wiggle=wiggle)
         try: os.remove(raw)
         except Exception: pass
         if ok:
@@ -757,6 +775,7 @@ def run_job(job_input: dict) -> dict:
         if render_mode == "stock":
             n_seg = num_scenes
             scene_texts = job_input.get("scene_texts") or []
+            video_wiggle = bool(job_input.get("video_wiggle", True))  # wiggle on video clips too
             seg_durs = compute_scene_durations(scene_texts, words, duration, n_seg)
             print(f"[JOB {job_id}] Step 3-4: STOCK ({n_seg} clips, word_aligned={bool(scene_texts)})")
             used = set()
@@ -770,7 +789,7 @@ def run_job(job_input: dict) -> dict:
                 phos = scene_photos[i] if i < len(scene_photos) else []
                 fit = scene_fit[i] if i < len(scene_fit) else "cover"
                 src_kind = "video"
-                ok = clip_from_video_urls(vids, clip, cdur, OUT_W, OUT_H, used)
+                ok = clip_from_video_urls(vids, clip, cdur, OUT_W, OUT_H, used, wiggle=video_wiggle)
                 if not ok:
                     src_kind = "photo"
                     ok = clip_from_photo_urls(phos, clip, cdur, OUT_W, OUT_H, used, fps, fit=fit)
