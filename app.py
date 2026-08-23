@@ -393,11 +393,12 @@ def _normalize_clip(raw, out_path, duration, w, h, wiggle=False, speed=1.0):
         # oscillates gently (AE-style wiggle) - the source keeps playing underneath.
         S, A = 1.14, 14.0
         bw, bh = int(w * S), int(h * S)
-        # Base rates are a slow drift (~1 cycle per 3.6s / 4.5s). The two axes stay
-        # on slightly different frequencies so the motion never looks like a loop.
+        # These base rates ARE the approved look, so wiggle_speed=1.0 reproduces it
+        # exactly and the multiplier only fine-tunes (0.9 = 10% slower). The two axes
+        # stay on slightly different frequencies so the motion never looks like a loop.
         try: sp = max(0.1, min(3.0, float(speed)))
         except Exception: sp = 1.0
-        fx, fy = 0.28 * sp, 0.22 * sp
+        fx, fy = 1.1 * sp, 0.9 * sp
         vf = (f"{pre}scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
               f"crop={w}:{h}:x='(in_w-out_w)/2 + {A}*sin(2*PI*{fx:.4f}*t)':"
               f"y='(in_h-out_h)/2 + {A}*sin(2*PI*{fy:.4f}*t+1.0)',setsar=1,fps=30")
@@ -441,13 +442,13 @@ def _fit_cover(img, tw, th):
 # One mild wiggle used for EVERY still (cover, contain, and AI) so motion is
 # uniform across the whole video. zoom_freq is per-SECOND, so the pulse speed is
 # identical on every scene regardless of how long that scene is (no end speed-up).
-MILD_WIGGLE = dict(base=1.08, amp=0.04, zoom_freq=0.15, pos_freq=0.30, pos_amp=16)
+MILD_WIGGLE = dict(base=1.08, amp=0.04, zoom_freq=0.5, pos_freq=1.2, pos_amp=16)
 
 
 def _wiggle_cfg(speed=1.0):
     """MILD_WIGGLE with only the RATES scaled by `speed` - amplitudes stay put, so
     the motion keeps the same size and just gets slower/faster. speed=1.0 is the
-    default slow drift; higher is faster."""
+    approved baseline; 0.9 is 10% slower."""
     try: sp = float(speed)
     except Exception: sp = 1.0
     sp = max(0.1, min(3.0, sp))
