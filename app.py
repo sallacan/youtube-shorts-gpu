@@ -379,7 +379,7 @@ def pexels_search_videos(query, api_key, timeout=20):
     return out
 
 
-def _normalize_clip(raw, out_path, duration, w, h, wiggle=False):
+def _normalize_clip(raw, out_path, duration, w, h, wiggle=False, speed=1.0):
     """ffmpeg: fill w x h, exactly `duration` sec, no audio. The video keeps PLAYING
     (each frame is cropped from the moving source, never frozen). When `wiggle` is on,
     the crop window gently oscillates so the clip gets the same subtle wiggle motion as
@@ -393,9 +393,14 @@ def _normalize_clip(raw, out_path, duration, w, h, wiggle=False):
         # oscillates gently (AE-style wiggle) - the source keeps playing underneath.
         S, A = 1.14, 14.0
         bw, bh = int(w * S), int(h * S)
+        # Base rates are a slow drift (~1 cycle per 3.6s / 4.5s). The two axes stay
+        # on slightly different frequencies so the motion never looks like a loop.
+        try: sp = max(0.1, min(3.0, float(speed)))
+        except Exception: sp = 1.0
+        fx, fy = 0.28 * sp, 0.22 * sp
         vf = (f"{pre}scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
-              f"crop={w}:{h}:x='(in_w-out_w)/2 + {A}*sin(2*PI*1.1*t)':"
-              f"y='(in_h-out_h)/2 + {A}*sin(2*PI*0.9*t+1.0)',setsar=1,fps=30")
+              f"crop={w}:{h}:x='(in_w-out_w)/2 + {A}*sin(2*PI*{fx:.4f}*t)':"
+              f"y='(in_h-out_h)/2 + {A}*sin(2*PI*{fy:.4f}*t+1.0)',setsar=1,fps=30")
     else:
         vf = f"{pre}scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30"
     cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", raw, "-t", f"{duration:.3f}",
@@ -436,7 +441,20 @@ def _fit_cover(img, tw, th):
 # One mild wiggle used for EVERY still (cover, contain, and AI) so motion is
 # uniform across the whole video. zoom_freq is per-SECOND, so the pulse speed is
 # identical on every scene regardless of how long that scene is (no end speed-up).
-MILD_WIGGLE = dict(base=1.08, amp=0.04, zoom_freq=0.5, pos_freq=1.2, pos_amp=16)
+MILD_WIGGLE = dict(base=1.08, amp=0.04, zoom_freq=0.15, pos_freq=0.30, pos_amp=16)
+
+
+def _wiggle_cfg(speed=1.0):
+    """MILD_WIGGLE with only the RATES scaled by `speed` - amplitudes stay put, so
+    the motion keeps the same size and just gets slower/faster. speed=1.0 is the
+    default slow drift; higher is faster."""
+    try: sp = float(speed)
+    except Exception: sp = 1.0
+    sp = max(0.1, min(3.0, sp))
+    c = dict(MILD_WIGGLE)
+    c["zoom_freq"] = MILD_WIGGLE["zoom_freq"] * sp
+    c["pos_freq"] = MILD_WIGGLE["pos_freq"] * sp
+    return c
 
 
 def _fit_contain_blur(img, tw, th, margin=0.90):
@@ -455,7 +473,7 @@ def _fit_contain_blur(img, tw, th, margin=0.90):
     return canvas
 
 
-def clip_from_video_urls(urls, out_path, duration, w, h, used, wiggle=False):
+def clip_from_video_urls(urls, out_path, duration, w, h, used, wiggle=False, speed=1.0):
     """Download the first UNUSED pre-resolved Pexels CDN video URL; play natively
     (with an optional gentle wiggle applied on top)."""
     for url in (urls or []):
@@ -464,7 +482,7 @@ def clip_from_video_urls(urls, out_path, duration, w, h, used, wiggle=False):
         raw = out_path + ".raw"
         if not _dl(url, raw):
             continue
-        ok = _normalize_clip(raw, out_path, duration, w, h, wiggle=wiggle)
+        ok = _normalize_clip(raw, out_path, duration, w, h, wiggle=wiggle, speed=speed)
         try: os.remove(raw)
         except Exception: pass
         if ok:
@@ -473,7 +491,7 @@ def clip_from_video_urls(urls, out_path, duration, w, h, used, wiggle=False):
     return False
 
 
-def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps, fit="cover"):
+def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps, fit="cover", speed=1.0):
     """Download the first UNUSED pre-resolved photo URL; apply wiggle zoom.
     fit="cover"  -> fill frame, full wiggle (good for textured scenery).
     fit="contain"-> show WHOLE image over blurred bg, gentle wiggle so the
@@ -495,7 +513,7 @@ def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps, fit="cover")
         # Landscape stills are NOT rotated (see _normalize_clip): _fit_cover already
         # resizes and centre-crops, which zooms the subject into 9:16 upright.
         img = _fit_cover(img, 900, 1600)
-        frames = wiggle_zoom(np.array(img), n, out_w=w, out_h=h, fps=fps, **MILD_WIGGLE)
+        frames = wiggle_zoom(np.array(img), n, out_w=w, out_h=h, fps=fps, **_wiggle_cfg(speed))
         frames_to_video(frames, out_path, fps=fps)
         try: os.remove(raw)
         except Exception: pass
@@ -767,6 +785,7 @@ def run_job(job_input: dict) -> dict:
             n_seg = num_scenes
             scene_texts = job_input.get("scene_texts") or []
             video_wiggle = bool(job_input.get("video_wiggle", True))  # wiggle on video clips too
+            wiggle_speed = job_input.get("wiggle_speed", 1.0)  # rate multiplier, 0.1-3.0; tune without a rebuild
             seg_durs = compute_scene_durations(scene_texts, words, duration, n_seg)
             print(f"[JOB {job_id}] Step 3-4: STOCK ({n_seg} clips, word_aligned={bool(scene_texts)})")
             used = set()
@@ -780,17 +799,17 @@ def run_job(job_input: dict) -> dict:
                 phos = scene_photos[i] if i < len(scene_photos) else []
                 fit = scene_fit[i] if i < len(scene_fit) else "cover"
                 src_kind = "video"
-                ok = clip_from_video_urls(vids, clip, cdur, OUT_W, OUT_H, used, wiggle=video_wiggle)
+                ok = clip_from_video_urls(vids, clip, cdur, OUT_W, OUT_H, used, wiggle=video_wiggle, speed=wiggle_speed)
                 if not ok:
                     src_kind = "photo"
-                    ok = clip_from_photo_urls(phos, clip, cdur, OUT_W, OUT_H, used, fps, fit=fit)
+                    ok = clip_from_photo_urls(phos, clip, cdur, OUT_W, OUT_H, used, fps, fit=fit, speed=wiggle_speed)
                 if not ok:
                     src_kind = "ai"
                     pipe = get_sdxl()
                     img = generate_image(scene, pipe)
                     src_img = Image.fromarray(img).resize((900, 1600), Image.BICUBIC)
                     frames = wiggle_zoom(np.array(src_img), int(cdur * fps), out_w=OUT_W, out_h=OUT_H,
-                                         fps=fps, **MILD_WIGGLE)
+                                         fps=fps, **_wiggle_cfg(wiggle_speed))
                     frames_to_video(frames, clip, fps=fps)
                 print(f"[JOB {job_id}]   seg {i+1}/{n_seg} [{src_kind}]: {scene[:45]}")
                 stock_srcs.append(src_kind)
