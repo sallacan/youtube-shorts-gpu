@@ -384,17 +384,10 @@ def _normalize_clip(raw, out_path, duration, w, h, wiggle=False):
     (each frame is cropped from the moving source, never frozen). When `wiggle` is on,
     the crop window gently oscillates so the clip gets the same subtle wiggle motion as
     the stills - applied on top of the footage, not a freeze-zoom."""
-    # Rotate landscape clips 90° so they fill the 9:16 frame with real content.
-    land = False
-    try:
-        pr = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                             "-show_entries", "stream=width,height", "-of", "csv=p=0", raw],
-                            capture_output=True, text=True)
-        vw, vh = [int(x) for x in pr.stdout.strip().split(",")[:2]]
-        land = vw > vh
-    except Exception:
-        land = False
-    pre = "transpose=1," if land else ""   # 90° clockwise for landscape
+    # Landscape clips are NOT rotated: turning a recognisable subject (a monument,
+    # a face, rows of statues) on its side looks broken. The scale+crop chain below
+    # already performs a centre-crop "zoom" that fills 9:16 with real, upright content.
+    pre = ""
     if wiggle:
         # scale to fill with headroom, then crop a w x h window whose position
         # oscillates gently (AE-style wiggle) - the source keeps playing underneath.
@@ -499,10 +492,8 @@ def clip_from_photo_urls(urls, out_path, duration, w, h, used, fps, fit="cover")
             continue
         n = int(duration * fps)
         iw, ih = img.size
-        # Rotate landscape media 90° so it fills the 9:16 frame with real content
-        # (no blurred bars). Aerial/top-down shots read fine rotated.
-        if iw > ih:
-            img = img.transpose(Image.ROTATE_270)   # 90° clockwise
+        # Landscape stills are NOT rotated (see _normalize_clip): _fit_cover already
+        # resizes and centre-crops, which zooms the subject into 9:16 upright.
         img = _fit_cover(img, 900, 1600)
         frames = wiggle_zoom(np.array(img), n, out_w=w, out_h=h, fps=fps, **MILD_WIGGLE)
         frames_to_video(frames, out_path, fps=fps)
