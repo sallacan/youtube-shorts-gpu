@@ -47,6 +47,25 @@ def get_sdxl():
     return _sdxl_pipe
 
 
+def _load_with_retry(what, fn, tries=4, base_delay=6.0):
+    """HuggingFace answers 429 when many cold workers pull the same model at once
+    (a fresh image means every worker has an empty cache). Back off and retry
+    instead of failing the whole job on a transient rate limit."""
+    last = None
+    for attempt in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last = e
+            if attempt == tries:
+                break
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f"[MODEL] {what} load failed (attempt {attempt}/{tries}): {e}")
+            print(f"[MODEL] retrying in {delay:.0f}s")
+            time.sleep(delay)
+    raise last
+
+
 def get_tts():
     global _tts_pipe
     if _tts_pipe is None:
@@ -57,7 +76,7 @@ def get_tts():
         _orig_cuda = torch.cuda.is_available
         torch.cuda.is_available = lambda: False
         try:
-            _tts_pipe = KPipeline(lang_code="a")
+            _tts_pipe = _load_with_retry("Kokoro TTS", lambda: KPipeline(lang_code="a"))
         finally:
             torch.cuda.is_available = _orig_cuda
         print("[MODEL] Kokoro TTS loaded on CPU")
@@ -68,7 +87,9 @@ def get_whisper():
     global _whisper_model
     if _whisper_model is None:
         print("[MODEL] Loading Faster-Whisper...")
-        _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+        _whisper_model = _load_with_retry(
+            "Faster-Whisper",
+            lambda: WhisperModel("large-v3", device="cuda", compute_type="float16"))
     return _whisper_model
 
 

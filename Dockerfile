@@ -21,6 +21,14 @@ RUN pip install --no-cache-dir numpy==1.26.4
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake Kokoro TTS weights into the image. Without this, EVERY cold worker fetches
+# them from HuggingFace at runtime; after an image rebuild all workers have an empty
+# cache at once and HF answers 429 (this took down a production render on 2026-08-24).
+ENV HF_HOME=/workspace/.cache/huggingface
+RUN python3 -c "from huggingface_hub import snapshot_download; \
+    snapshot_download('hexgrad/Kokoro-82M')" \
+    && du -sh /workspace/.cache/huggingface
+
 # Copy app
 COPY app.py handler.py ./
 
