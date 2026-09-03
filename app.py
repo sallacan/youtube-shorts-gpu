@@ -886,30 +886,39 @@ def run_job(job_input: dict) -> dict:
         upload_errors = []
 
         def _is_direct_video_url(url):
-            """HEAD-check that a URL serves a non-empty binary file, not an HTML page or deleted file."""
-            try:
-                chk = subprocess.run(
-                    ["curl", "-sI", "--max-time", "15", "--max-redirs", "5", "-L", url],
-                    capture_output=True, text=True
-                )
-                # Find the last Content-Type and Content-Length headers (after redirects)
-                ct = ""
-                cl = ""
-                for line in chk.stdout.splitlines():
-                    ll = line.lower()
-                    if ll.startswith("content-type:"):
-                        ct = ll
-                    if ll.startswith("content-length:"):
-                        cl = ll
-                is_binary = "text/html" not in ct and "text/plain" not in ct
-                # Content-Length: 0 means file was deleted (e.g. catbox purges datacenter uploads)
-                is_nonempty = "content-length: 0" not in cl
-                ok = is_binary and is_nonempty
-                print(f"[JOB {job_id}] URL check {url[:60]} → ct={ct.strip()} cl={cl.strip()} → {'OK' if ok else 'REJECTED'}")
-                return ok
-            except Exception as e:
-                print(f"[JOB {job_id}] URL check failed: {e}")
-                return False
+            """Verify a URL really serves file bytes.
+
+            This used to HEAD-check (curl -sI). catbox answers HEAD without a usable
+            Content-Length, so a perfectly good permanent catbox link was REJECTED on
+            every render and the chain fell through to litterbox. When litterbox went
+            offline (2026-09-02) that took every upload down with it. A small ranged
+            GET is the only thing that actually proves the bytes are fetchable.
+            """
+            for attempt in (1, 2):
+                try:
+                    chk = subprocess.run(
+                        ["curl", "-s", "-o", "/dev/null", "-L", "--max-time", "25",
+                         "--max-redirs", "5", "-r", "0-2047",
+                         "-w", "%{http_code} %{content_type} %{size_download}", url],
+                        capture_output=True, text=True
+                    )
+                    parts = (chk.stdout or "").strip().split()
+                    code = parts[0] if parts else "000"
+                    ctype = (parts[1] if len(parts) > 1 else "").lower()
+                    size = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                    is_binary = "text/html" not in ctype and "text/plain" not in ctype
+                    ok = code in ("200", "206") and size > 0 and is_binary
+                    print(f"[JOB {job_id}] URL check {url[:60]} -> code={code} ct={ctype} "
+                          f"bytes={size} -> {'OK' if ok else 'REJECTED'}")
+                    if ok:
+                        return True
+                    if attempt == 1:
+                        time.sleep(3)   # give the host a moment to publish the file
+                except Exception as e:
+                    print(f"[JOB {job_id}] URL check failed: {e}")
+                    if attempt == 1:
+                        time.sleep(3)
+            return False
 
         # Try catbox.moe (permanent, no account needed, 200MB limit)
         r1 = subprocess.run(
