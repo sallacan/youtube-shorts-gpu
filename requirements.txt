@@ -10,5 +10,9 @@ soundfile==0.14.0
 numpy==1.26.4
 Pillow==10.2.0
 faster-whisper==1.2.1
+# faster-whisper only bounds this to >=4.0,<5, so it floated. 4.6.3 added CUDA 12.8 (Blackwell)
+# support; 4.8.2 is what the unpinned build resolved to when b5d7a621 was built, so pinning it
+# keeps the Whisper runtime identical to what is already in production.
+ctranslate2==4.8.2
 safetensors==0.8.0
 sentencepiece==0.2.1
