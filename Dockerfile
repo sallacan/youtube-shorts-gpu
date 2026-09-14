@@ -1,11 +1,16 @@
-FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+# PyTorch 2.7.1 + CUDA 12.8 is the first stable line with kernels for Blackwell (sm_120).
+# 2.4.1+cu121 stopped at sm_90, so any RTX PRO 6000 Blackwell MIG slice RunPod handed out
+# crashed at CUDA init - and RunPod pools those slices with ordinary 24/48 GB cards even when
+# gpuTypeIds lists exact model names. That forced the endpoints onto 80 GB H100s at ~8x the
+# per-second price. With Blackwell supported, the cheap pool is usable again.
+FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /workspace
 
-# System deps (Python, PyTorch 2.4.1+cu121, torchvision, torchaudio already in base)
+# System deps (Python, PyTorch 2.7.1+cu128, torchvision, torchaudio already in base)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \

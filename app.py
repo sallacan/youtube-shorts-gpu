@@ -727,6 +727,18 @@ def merge_number_tokens(words):
     return out
 
 
+def _gpu_info() -> dict:
+    """Which card this job actually ran on. RunPod's billing is the only other record
+    of that, and it lags by an hour or more."""
+    if not torch.cuda.is_available():
+        return {"cuda": False, "torch": torch.__version__}
+    p = torch.cuda.get_device_properties(0)
+    return {"name": torch.cuda.get_device_name(0),
+            "capability": "sm_%d%d" % torch.cuda.get_device_capability(0),
+            "vram_gb": round(p.total_memory / 1024**3, 1),
+            "torch": torch.__version__, "cuda": torch.version.cuda}
+
+
 def run_job(job_input: dict) -> dict:
     """
     job_input keys:
@@ -740,6 +752,44 @@ def run_job(job_input: dict) -> dict:
         job_id      (str, optional) - auto-generated if missing
     """
     job_id = job_input.get("job_id") or str(uuid.uuid4())[:8]
+
+    # ── FAST GPU DIAGNOSTIC (no render) ──────────────────────────────────
+    # Exercises every GPU-backed component on whatever card RunPod assigned, so a new
+    # base image can be qualified on a specific GPU family in ~a minute instead of a
+    # full render. Each stage is isolated: one failure does not hide the others.
+    if job_input.get("diag_gpu"):
+        import time as _t
+        res = {"gpu": _gpu_info()}
+        def _stage(name, fn):
+            t0 = _t.time()
+            try:
+                out = fn()
+                res[name] = {"ok": True, "s": round(_t.time() - t0, 1), **(out or {})}
+            except Exception as e:
+                res[name] = {"ok": False, "s": round(_t.time() - t0, 1), "err": f"{type(e).__name__}: {e}"[:400]}
+        def _cuda_math():
+            a = torch.randn(512, 512, device="cuda", dtype=torch.float16)
+            return {"matmul_sum": float((a @ a).float().abs().sum().item()) > 0}
+        _stage("cuda_math", _cuda_math)
+        wav = os.path.join(tempfile.gettempdir(), "diag_tts.wav")
+        def _tts():
+            # Same calls as the render path (tuple unpacking + torchaudio.save), because
+            # torchaudio moves with the PyTorch base image too.
+            chunks = [a for _, _, a in get_tts()("The quick brown fox jumps over the lazy dog.",
+                                                 voice="af_heart", speed=1.0) if a is not None]
+            t = torch.cat([c.detach().cpu() if isinstance(c, torch.Tensor) else torch.tensor(c) for c in chunks])
+            torchaudio.save(wav, t.unsqueeze(0), 24000)
+            return {"seconds": round(sf.info(wav).duration, 2)}
+        _stage("kokoro_tts", _tts)
+        _stage("whisper", lambda: {"words": len(transcribe_words(wav))} if os.path.exists(wav) else {"skipped": "no tts audio"})
+        if job_input.get("diag_sdxl", True):
+            def _sdxl():
+                img = get_sdxl()(prompt="a lighthouse on a cliff at sunset", num_inference_steps=4,
+                                 width=512, height=512).images[0]
+                return {"size": list(img.size)}
+            _stage("sdxl", _sdxl)
+        res["vram_peak_gb"] = round(torch.cuda.max_memory_allocated() / 1024**3, 2)
+        return {"job_id": job_id, "diag_gpu": res}
 
     # ── FAST NETWORK DIAGNOSTIC (no render) ──────────────────────────────
     if job_input.get("diag_net"):
@@ -1109,6 +1159,7 @@ def run_job(job_input: dict) -> dict:
             "duration": round(duration, 2),
             "scenes": num_scenes,
             "upload_errors": upload_errors,
+            "gpu": _gpu_info(),
         }
 
     finally:
