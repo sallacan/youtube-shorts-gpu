@@ -18,7 +18,7 @@ from diffusers import StableDiffusionXLPipeline
 from kokoro import KPipeline
 from faster_whisper import WhisperModel
 
-import r2
+import r2 as r2_storage   # not 'r2': run_job already uses r2 for the litterbox subprocess result
 
 
 # ── Global model cache ──────────────────────────────────────────────
@@ -821,7 +821,7 @@ def run_job(job_input: dict) -> dict:
         gg = subprocess.run(["curl", "-sL", "-o", "/dev/null", "--max-time", "20",
                              "-w", "%{http_code}", "https://www.google.com"], capture_output=True, text=True)
         res["google_egress"] = gg.stdout[-3:]
-        res["r2"] = r2.self_test()
+        res["r2"] = r2_storage.self_test()
         # (d) can the worker download from the Pexels CDN (videos.pexels.com)?
         turl = job_input.get("cdn_test")
         if turl:
@@ -1031,7 +1031,7 @@ def run_job(job_input: dict) -> dict:
         # uguu.se, which deletes files after ~3 hours. R2 keeps them for 7 days (bucket lifecycle).
         r2_slug = re.sub(r"[^A-Za-z0-9_-]+", "-", safe_title).strip("-")[:60] or "video"
         r2_key = time.strftime("renders/%Y-%m-%d/", time.gmtime()) + f"{job_id}_{r2_slug}.mp4"
-        r2_url, r2_err = r2.upload_file(output_path, r2_key)
+        r2_url, r2_err = r2_storage.upload_file(output_path, r2_key)
         if r2_url and _is_direct_video_url(r2_url):
             video_url = r2_url
             print(f"[JOB {job_id}] Uploaded to R2: {r2_key}")
