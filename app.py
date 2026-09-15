@@ -18,6 +18,8 @@ from diffusers import StableDiffusionXLPipeline
 from kokoro import KPipeline
 from faster_whisper import WhisperModel
 
+import r2
+
 
 # ── Global model cache ──────────────────────────────────────────────
 _sdxl_pipe = None
@@ -819,6 +821,7 @@ def run_job(job_input: dict) -> dict:
         gg = subprocess.run(["curl", "-sL", "-o", "/dev/null", "--max-time", "20",
                              "-w", "%{http_code}", "https://www.google.com"], capture_output=True, text=True)
         res["google_egress"] = gg.stdout[-3:]
+        res["r2"] = r2.self_test()
         # (d) can the worker download from the Pexels CDN (videos.pexels.com)?
         turl = job_input.get("cdn_test")
         if turl:
@@ -1023,19 +1026,32 @@ def run_job(job_input: dict) -> dict:
                         time.sleep(3)
             return False
 
-        # Try catbox.moe (permanent, no account needed, 200MB limit)
-        r1 = subprocess.run(
-            ["curl", "-s", "--max-time", "120",
-             "-F", "reqtype=fileupload",
-             "-F", f"fileToUpload=@{output_path}",
-             "https://catbox.moe/user/api.php"],
-            capture_output=True, text=True
-        )
-        if r1.stdout.strip().startswith("http") and _is_direct_video_url(r1.stdout.strip()):
-            video_url = r1.stdout.strip()
-            print(f"[JOB {job_id}] Uploaded to catbox.moe")
+        # Our own bucket first. Since early September catbox answers RunPod servers with
+        # "Invalid uploader", litterbox returns an error page, and most renders fell through to
+        # uguu.se, which deletes files after ~3 hours. R2 keeps them for 7 days (bucket lifecycle).
+        r2_slug = re.sub(r"[^A-Za-z0-9_-]+", "-", safe_title).strip("-")[:60] or "video"
+        r2_key = time.strftime("renders/%Y-%m-%d/", time.gmtime()) + f"{job_id}_{r2_slug}.mp4"
+        r2_url, r2_err = r2.upload_file(output_path, r2_key)
+        if r2_url and _is_direct_video_url(r2_url):
+            video_url = r2_url
+            print(f"[JOB {job_id}] Uploaded to R2: {r2_key}")
         else:
-            upload_errors.append(f"catbox: rc={r1.returncode} out={r1.stdout[:100]}")
+            upload_errors.append(r2_err or "r2: uploaded but the download check failed")
+
+        # Fallback: catbox.moe (permanent, no account needed, 200MB limit)
+        if not video_url:
+            r1 = subprocess.run(
+                ["curl", "-s", "--max-time", "120",
+                 "-F", "reqtype=fileupload",
+                 "-F", f"fileToUpload=@{output_path}",
+                 "https://catbox.moe/user/api.php"],
+                capture_output=True, text=True
+            )
+            if r1.stdout.strip().startswith("http") and _is_direct_video_url(r1.stdout.strip()):
+                video_url = r1.stdout.strip()
+                print(f"[JOB {job_id}] Uploaded to catbox.moe")
+            else:
+                upload_errors.append(f"catbox: rc={r1.returncode} out={r1.stdout[:100]}")
 
         # Fallback 1: litterbox.catbox.moe (temporary 72h)
         if not video_url:

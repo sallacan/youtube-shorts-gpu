@@ -34,8 +34,24 @@ RUN python3 -c "from huggingface_hub import snapshot_download; \
     snapshot_download('hexgrad/Kokoro-82M')" \
     && du -sh /workspace/.cache/huggingface
 
+# Bake the two big models as well. Until now only Kokoro was baked: SDXL (~7 GB) and Whisper
+# large-v3 (~3 GB) were downloaded from HuggingFace, anonymously, inside EVERY render, because
+# serverless workers start empty. Measured on the production image (2026-09-14): the same job took
+# 84 s on a warm worker and 177-246 s on a cold one; production medians were 270-288 s. Most of
+# the billed GPU time was downloading. These layers sit above the code COPY so a code change does
+# not re-download them.
+RUN python3 -c "from diffusers import StableDiffusionXLPipeline; \
+    StableDiffusionXLPipeline.download('SG161222/RealVisXL_V4.0', variant='fp16', use_safetensors=True)" \
+    && du -sh /workspace/.cache/huggingface
+RUN python3 -c "from faster_whisper.utils import download_model; download_model('large-v3')" \
+    && du -sh /workspace/.cache/huggingface
+
+# Renders must never reach HuggingFace again: everything they load is in the image now. Offline mode
+# turns a missing file into an immediate, visible error instead of a silent 10 GB download.
+ENV HF_HUB_OFFLINE=1
+
 # Copy app
-COPY app.py handler.py ./
+COPY app.py handler.py r2.py ./
 
 # Copy music files
 COPY music/ /workspace/music/
