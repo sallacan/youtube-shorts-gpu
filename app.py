@@ -13,7 +13,7 @@ import torchaudio
 import time
 import math
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from diffusers import StableDiffusionXLPipeline
 from kokoro import KPipeline
 from faster_whisper import WhisperModel
@@ -239,7 +239,7 @@ def crossfade_scenes(scene_list: list, crossfade: int = 18) -> list:
     return result
 
 
-def frames_to_video(frames: list, output_path: str, fps: int = 24):
+def frames_to_video(frames: list, output_path: str, fps: int = 30):
     w, h = frames[0].size
     cmd = [
         "ffmpeg", "-y",
@@ -409,7 +409,7 @@ def merge_video_audio(video_path: str, audio_path: str, ass_path: str,
         "-i", video_path,
         "-i", audio_path,
         "-vf", f"subtitles={ass_escaped}:force_style='FontName={font_name}'",
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-r", "30",
         "-c:a", "aac", "-b:a", "192k",
         "-t", str(duration),
         "-movflags", "+faststart",
@@ -701,6 +701,43 @@ def compute_scene_durations(scene_texts, words, total_duration, n_seg):
     return durs
 
 
+def add_scene1_pointer(video_path, work_dir, w, h, start=0.35, stop=2.3):
+    """Draw a red ring and arrow over the opening shot, fading in and out.
+
+    Every high-performing reference Short we measured aims the viewer's eye at the exact
+    thing being discussed in the first frames - a red arrow, a circled detail, a numbered
+    list. None of ours did. The ring sits slightly above centre because stock clips and
+    SDXL stills both frame their subject there; it is a fixed position, not subject
+    detection, so it points at the middle of the shot rather than at a located object.
+    Disable per job with {"scene1_pointer": false}.
+    """
+    overlay_png = os.path.join(work_dir, "pointer.png")
+    out_path = os.path.join(work_dir, "with_pointer.mp4")
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    cx, cy, r = w // 2, int(h * 0.42), int(w * 0.26)
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(230, 30, 30, 255), width=9)
+    # arrow from lower right up to the ring
+    ax, ay = cx + int(r * 1.45), cy + int(r * 1.55)
+    tx, ty = cx + int(r * 0.78), cy + int(r * 0.78)
+    d.line([ax, ay, tx, ty], fill=(230, 30, 30, 255), width=9)
+    head = int(w * 0.055)
+    d.polygon([(tx, ty), (tx + head, ty + int(head * 0.35)), (tx + int(head * 0.35), ty + head)],
+              fill=(230, 30, 30, 255))
+    img.save(overlay_png)
+    r_ = subprocess.run([
+        "ffmpeg", "-y", "-i", video_path, "-i", overlay_png,
+        "-filter_complex",
+        f"[1]format=rgba,fade=in:st={start}:d=0.25:alpha=1,fade=out:st={stop - 0.35}:d=0.35:alpha=1[ov];"
+        f"[0][ov]overlay=0:0:enable='between(t,{start},{stop})'",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-r", "30", "-an", out_path
+    ], capture_output=True, text=True)
+    if r_.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) < 1000:
+        print(f"[POINTER] overlay failed, keeping plain video: {r_.stderr[-200:]}")
+        return video_path
+    return out_path
+
+
 def concat_stock_clips(clip_paths, out_path, duration):
     listfile = out_path + ".txt"
     with open(listfile, "w") as f:
@@ -863,7 +900,7 @@ def run_job(job_input: dict) -> dict:
         ( 0.07, -0.07),  # diagonal  + slow zoom in
     ]
     CROSSFADE = 18  # frames blended at each scene boundary
-    fps = 24
+    fps = 30   # stock clips were already normalised to 30; the SDXL path used to render 24
 
     work_dir = tempfile.mkdtemp(prefix=f"job_{job_id}_")
     print(f"[JOB {job_id}] Starting — {len(scenes)} scenes")
@@ -964,6 +1001,9 @@ def run_job(job_input: dict) -> dict:
             all_frames = crossfade_scenes(scene_frames_list, CROSSFADE)
             print(f"[JOB {job_id}] Step 4: Writing video")
             frames_to_video(all_frames, silent_video, fps=fps)
+
+        if job_input.get("scene1_pointer", True):
+            silent_video = add_scene1_pointer(silent_video, work_dir, OUT_W, OUT_H)
 
         # ── STEP 5: Subtitles ─────────────────────────────────────────────
         print(f"[JOB {job_id}] Step 5: Subtitles")
