@@ -455,6 +455,25 @@ def pexels_search_videos(query, api_key, timeout=20):
     return out
 
 
+def _clip_start_offset(raw, duration):
+    """Where to start inside a stock clip.
+
+    Pexels clips routinely open on empty water, sky or ground and bring the subject in a
+    few seconds later: a scene promising "Bottlenose Dolphin swimming" rendered as bare
+    reef because we always cut from 0. Start a quarter of the way in when the source is
+    long enough to still cover the scene from there.
+    """
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "csv=p=0", raw], capture_output=True, text=True).stdout.strip()
+        src = float(out)
+    except Exception:
+        return 0.0
+    if not src or src <= duration + 1.0:
+        return 0.0
+    return round(min(src * 0.25, max(0.0, src - duration - 0.5)), 2)
+
+
 def _normalize_clip(raw, out_path, duration, w, h, wiggle=False, speed=1.0):
     """ffmpeg: fill w x h, exactly `duration` sec, no audio. The video keeps PLAYING
     (each frame is cropped from the moving source, never frozen). When `wiggle` is on,
@@ -480,7 +499,11 @@ def _normalize_clip(raw, out_path, duration, w, h, wiggle=False, speed=1.0):
               f"y='(in_h-out_h)/2 + {A}*sin(2*PI*{fy:.4f}*t+1.0)',setsar=1,fps=30")
     else:
         vf = f"{pre}scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30"
-    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", raw, "-t", f"{duration:.3f}",
+    off = _clip_start_offset(raw, duration)
+    cmd = ["ffmpeg", "-y", "-stream_loop", "-1"]
+    if off > 0:
+        cmd += ["-ss", f"{off:.2f}"]
+    cmd += ["-i", raw, "-t", f"{duration:.3f}",
            "-vf", vf, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
            "-preset", "veryfast", "-crf", "20", out_path]
     r = subprocess.run(cmd, capture_output=True)
@@ -726,10 +749,11 @@ def add_scene1_pointer(video_path, work_dir, w, h, start=0.35, stop=2.3):
               fill=(230, 30, 30, 255))
     img.save(overlay_png)
     r_ = subprocess.run([
-        "ffmpeg", "-y", "-i", video_path, "-i", overlay_png,
+        # -loop 1: a still PNG otherwise exists only at t=0, so the overlay never appeared
+        "ffmpeg", "-y", "-i", video_path, "-loop", "1", "-i", overlay_png,
         "-filter_complex",
         f"[1]format=rgba,fade=in:st={start}:d=0.25:alpha=1,fade=out:st={stop - 0.35}:d=0.35:alpha=1[ov];"
-        f"[0][ov]overlay=0:0:enable='between(t,{start},{stop})'",
+        f"[0][ov]overlay=0:0:shortest=1:enable='between(t,{start},{stop})'",
         "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-r", "30", "-an", out_path
     ], capture_output=True, text=True)
     if r_.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) < 1000:
